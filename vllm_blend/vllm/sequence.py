@@ -3,7 +3,7 @@ import copy
 import enum
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
-
+import torch
 from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
@@ -548,7 +548,20 @@ class SequenceGroup:
                 f"sampling_params={self.sampling_params}, "
                 f"num_seqs={len(self.seqs_dict)})")
 
-
+class CacheShareMetadata:
+    """Metadata for cache sharing.
+    
+    Args:
+        request_id: The ID of the request.
+        cache_fuse_metadata: The cache fuse metadata.
+    """
+    # prompt token中未被reuse的token index
+    unreused_indices: List[int]
+    # prompt token中被reuse的token index
+    reused_indices: List[int]
+    # 共享的kvcache
+    shared_kv: torch.Tensor
+    
 class SequenceGroupMetadata:
     """Metadata for a sequence group. Used to create `AttentionMetadata`.
 
@@ -565,7 +578,7 @@ class SequenceGroupMetadata:
         lora_request: LoRA request.
         multi_modal_data: Multi modal data.
     """
-
+    
     def __init__(
         self,
         request_id: str,
@@ -589,6 +602,11 @@ class SequenceGroupMetadata:
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
         self._token_chunk_size = token_chunk_size
+
+        # 本条是否需要收集KV
+        # self.need_collect_kv = False
+        # self.hack_kvs = None
+        
 
         if self._token_chunk_size is None:
             if is_prompt:

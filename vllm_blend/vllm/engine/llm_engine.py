@@ -569,7 +569,7 @@ class LLMEngine:
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
             scheduler_outputs.ignored_seq_groups)
-
+       
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(

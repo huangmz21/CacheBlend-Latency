@@ -307,6 +307,8 @@ class LlamaModel(nn.Module):
                                     "attn_bias": None,
                                     "imp_indices": None,
                                     "org_seq_len": None,
+                                    "reused_positions": None,
+                                    "unreused_positions": None,
                                     "collect": False}
         
         self.old_kvs = [[None,None]] * len(self.layers)

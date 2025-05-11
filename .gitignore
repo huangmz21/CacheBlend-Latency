@@ -1,2 +1,6 @@
 **/__pycache__
 outputs/
+
+kvcache_disk_pool/
+kvcache.db
+*.png

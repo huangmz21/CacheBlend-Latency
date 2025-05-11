@@ -202,17 +202,22 @@ class XFormersImpl(AttentionImpl):
             value_old = old_kv[1].view(-1, self.num_kv_heads, self.head_size)
         
         if status in [1]:
-            last_len = cache_fuse_metadata['suffix_len']
-            total_len = value.shape[0]
-            last_indices = [total_len-last_len+l for l in range(last_len)]
+            unreused_positions = cache_fuse_metadata["unreused_positions"]
+            reused_positions = cache_fuse_metadata["reused_positions"]
+            
+            
+            
+            # last_len = cache_fuse_metadata['suffix_len']
+            # total_len = value.shape[0]
+            # last_indices = [total_len-last_len+l for l in range(last_len)]
 
-            topk_num = int((total_len-last_len)*cache_fuse_metadata["recomp_ratio"])
-            temp_diff = torch.sum((value[:-last_len,:,:]-value_old[:-last_len,:,:])**2, dim=[1,2])
+            topk_num = int(len(unreused_positions)*cache_fuse_metadata["recomp_ratio"])
+            temp_diff = torch.sum((value[reused_positions,:,:]-value_old[reused_positions,:,:])**2, dim=[1,2])
             top_indices = torch.topk(temp_diff, k=topk_num).indices
             
             top_indices, _ = torch.sort(top_indices)
             top_indices = torch.cat([top_indices,
-                                        torch.tensor(last_indices, device=top_indices.device)])
+                                    unreused_positions.to(top_indices.device)])
             query = query[top_indices]
             cache_fuse_metadata["imp_indices"] = top_indices
             
@@ -231,8 +236,8 @@ class XFormersImpl(AttentionImpl):
         # Jiayi: whether partial update or full update at check layer
         if status in [1]:
             imp_indices = cache_fuse_metadata["imp_indices"]
-            #key_old[imp_indices] = key[imp_indices]
-            #value_old[imp_indices] = value[imp_indices]
+            key_old[imp_indices] = key[imp_indices]
+            value_old[imp_indices] = value[imp_indices]
             #key = key_old
             #value = value_old
             

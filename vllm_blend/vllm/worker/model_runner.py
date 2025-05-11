@@ -173,6 +173,11 @@ class ModelRunner:
         
         #self.lmcache_driver = LMCVLLMDriver(self.cache_engine, self.model_config, self.parallel_config, self.device)
         #self.hack_kvs = None
+        
+        # 存的是request_id 和 hack_kvs
+        self.cpu_hack_kvcache_pool = {}
+        self.cpu_prefetch_kvcache_pool = {}
+        
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -885,8 +890,72 @@ class ModelRunner:
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
+        
+        # =====================开始HACK 需要根据当前的seq_group_metadata_list预取KV
+        # 预取KV
+        if attn_metadata.prefill_metadata is not None and self.model.model.cache_fuse_metadata['check']:
+            batch_target_kvcache = []
+            batch_reused_positions = []
+            batch_unreused_positions = []
+            prefix_seq_len = 0
+            select_token_indices = []
+            prefix_unreused_token_len = 0
+            for seq_group_metadata in seq_group_metadata_list:
+                if seq_group_metadata.is_prompt:
+                    request_id = int(seq_group_metadata.request_id)
+                    
+                    batch_target_kvcache.append(self.cpu_prefetch_kvcache_pool[request_id]["kvcache"])
+                    reused_positions = self.cpu_prefetch_kvcache_pool[request_id]["reused_positions"]
+                    unreused_positions = self.cpu_prefetch_kvcache_pool[request_id]["unreused_positions"]
+                    batch_reused_positions.extend([i+prefix_seq_len for i in reused_positions])
+                    batch_unreused_positions.extend([i+prefix_seq_len for i in unreused_positions])
+                    prefix_seq_len += len(seq_group_metadata.seq_data[request_id].prompt_token_ids)
+                    select_token_indices.append(prefix_unreused_token_len+len(unreused_positions)-1)
+                    prefix_unreused_token_len += len(unreused_positions)
+            batch_target_kvcache = torch.cat(batch_target_kvcache, dim=2)
+            batch_reused_positions = torch.tensor(batch_reused_positions,dtype=torch.int32)
+            batch_unreused_positions = torch.tensor(batch_unreused_positions,dtype=torch.int32)
+            # 
+            self.model.model.old_kvs = batch_target_kvcache
+            self.model.model.cache_fuse_metadata['reused_positions'] = batch_reused_positions
+            self.model.model.cache_fuse_metadata['unreused_positions'] = batch_unreused_positions
+
         hidden_states = model_executable(**execute_model_kwargs)
 
+        # =====================开始HACK 这里需要清空model_runner
+        if attn_metadata.prefill_metadata is not None and self.model.model.cache_fuse_metadata['check']:
+            self.model.model.old_kvs = None
+            self.cpu_prefetch_kvcache_pool = {}
+            
+
+        # 在Prefill中根据当前的请求的顺序，重新将HACK的KV 提取出来
+        if attn_metadata.prefill_metadata is not None and self.model.model.cache_fuse_metadata['collect']:
+            num_seqs = len(seq_group_metadata_list)
+            num_layers = len(self.model.model.layers)
+            all_hack_kvs = []
+            for layer_idx in range(num_layers):
+                hack_kvs = self.model.model.layers[layer_idx].self_attn.hack_kv
+                all_hack_kvs.append(torch.stack(hack_kvs, dim=0).cpu())
+            # [num_layers, 2, num_seqs, num_kv_dim]
+            all_hack_kvs = torch.stack(all_hack_kvs, dim=0)
+            
+            # 计算前缀索引，提取出每个请求对应的KV，存储回seq_group_metadata即可
+            past_seq_len = 0
+            for i in range(num_seqs):
+                seq_group_metadata = seq_group_metadata_list[i]
+                seq_data = seq_group_metadata.seq_data[int(seq_group_metadata.request_id)].prompt_token_ids
+                # if sampling_metadata.need_collect_kv:
+                current_seq_hack_kvs = all_hack_kvs[:, :, past_seq_len:past_seq_len+len(seq_data), :]
+
+                self.cpu_hack_kvcache_pool[seq_group_metadata.request_id] = current_seq_hack_kvs
+                past_seq_len += len(seq_data)
+        pass
+        
+        
+         
+         
+         
+         
         # HACK(Jiayi): only use cpu local store
         # Cache engine: gather the kv cache and store it to cache engine
         # if self.cache_engine is not None and \
@@ -906,12 +975,10 @@ class ModelRunner:
         
         # Compute the logits.
         if self.model.model.cache_fuse_metadata['check']:
-            #import pdb
-            #pdb.set_trace()
             temp_data = sampling_metadata.selected_token_indices.clone()
-            sampling_metadata.selected_token_indices[0] = hidden_states.shape[0]-1
+            # sampling_metadata.selected_token_indices[0] = hidden_states.shape[0]-1
+            sampling_metadata.selected_token_indices =  torch.tensor(select_token_indices,dtype=temp_data.dtype).to(temp_data.device)
             self.model.model.cache_fuse_metadata['check'] = False
-            #pdb.set_trace()
             logits = self.model.compute_logits(hidden_states, sampling_metadata)
             sampling_metadata.selected_token_indices = temp_data
         else:
