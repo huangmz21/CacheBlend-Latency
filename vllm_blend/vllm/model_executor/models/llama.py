@@ -309,7 +309,11 @@ class LlamaModel(nn.Module):
                                     "org_seq_len": None,
                                     "reused_positions": None,
                                     "unreused_positions": None,
-                                    "collect": False}
+                                    "collect": False,
+                                    "recompute_mode": 0,
+                                    "recompute_indices_in_decode": None,
+                                    "kvshare_atten_mask": None,
+                                    }
         
         self.old_kvs = [[None,None]] * len(self.layers)
         

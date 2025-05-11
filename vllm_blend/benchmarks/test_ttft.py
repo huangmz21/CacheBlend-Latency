@@ -258,8 +258,81 @@ class ShareLLM(LLM):
             pbar.close()
         outputs = sorted(outputs, key=lambda x: int(x.request_id))
         return outputs
-
     
+    
+    def cacheblend_generate(self,
+                            prompts: Optional[Union[str, List[str]]] = None,
+                            sampling_params: Optional[Union[SamplingParams,
+                                                            List[SamplingParams]]] = None,
+                            prompt_token_ids: Optional[List[List[int]]] = None,
+                            use_tqdm: bool = True,
+                            ) -> List[RequestOutput]:
+        """
+        
+        """
+        cache_fuse_metadata['collect'] = False
+        cache_fuse_metadata['check'] = False
+        cache_fuse_metadata['recompute_mode'] = 0
+        
+        return self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
+    
+    def epic_generate(self,
+                                 prompts: Optional[Union[str, List[str]]] = None,
+                                 sampling_params: Optional[Union[SamplingParams,
+                                                                 List[SamplingParams]]] = None,
+                                 prompt_token_ids: Optional[List[List[int]]] = None,
+                                 use_tqdm: bool = True,
+                                 ) -> List[RequestOutput]:
+        """
+        
+        """
+        cache_fuse_metadata['collect'] = False
+        cache_fuse_metadata['check'] = False
+        cache_fuse_metadata['recompute_mode'] = 2
+
+        return self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
+    
+    def naive_generate(self,
+                        prompts: Optional[Union[str, List[str]]] = None,
+                        sampling_params: Optional[Union[SamplingParams,
+                                                        List[SamplingParams]]] = None,
+                        prompt_token_ids: Optional[List[List[int]]] = None,
+                        use_tqdm: bool = True,
+                        ) -> List[RequestOutput]:
+        """
+        
+        """
+        cache_fuse_metadata['collect'] = False
+        cache_fuse_metadata['check'] = False
+        cache_fuse_metadata['recompute_mode'] = 3
+
+        return self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
+
+    def kvshare_generate(self,
+                         prompts: Optional[Union[str, List[str]]] = None,
+                         sampling_params: Optional[Union[SamplingParams,
+                                                         List[SamplingParams]]] = None,
+                         prompt_token_ids: Optional[List[List[int]]] = None,
+                         use_tqdm: bool = True,
+                         ) -> List[RequestOutput]:
+        """
+        
+        """
+        cache_fuse_metadata['collect'] = False
+        cache_fuse_metadata['check'] = False
+        cache_fuse_metadata['recompute_mode'] = 1
+
+        return self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
+
+# def benchmark_ttft(llm: ShareLLM,prompts: List[str],sampling_params: List[SamplingParams]):
+#     """
+#     计算TTFT
+#     """
+#     outputs = llm.precompute_generate(prompts=prompts,
+#                                 sampling_params=sampling_params)
+#     outputs = llm.share_generate(prompts=prompts,
+#                                 sampling_params=sampling_params)
+#     return outputs
 
 
 if __name__ == "__main__":
@@ -276,7 +349,7 @@ if __name__ == "__main__":
                                 sampling_params=[SamplingParams(temperature=0.0,max_tokens=1),
                                                 SamplingParams(temperature=0.0,max_tokens=1)])
     
-    outputs = llm.share_generate(prompts=target_prompts,
+    outputs = llm.cacheblend_generate(prompts=target_prompts,
                                 sampling_params=[SamplingParams(temperature=0.0,max_tokens=128),
                                                 SamplingParams(temperature=0.0,max_tokens=128)])
     

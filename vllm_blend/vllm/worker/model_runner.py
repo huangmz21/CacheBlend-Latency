@@ -900,22 +900,24 @@ class ModelRunner:
             prefix_seq_len = 0
             select_token_indices = []
             prefix_unreused_token_len = 0
+            
+            
+            
             for seq_group_metadata in seq_group_metadata_list:
-                if seq_group_metadata.is_prompt:
-                    request_id = int(seq_group_metadata.request_id)
-                    
-                    batch_target_kvcache.append(self.cpu_prefetch_kvcache_pool[request_id]["kvcache"])
-                    reused_positions = self.cpu_prefetch_kvcache_pool[request_id]["reused_positions"]
-                    unreused_positions = self.cpu_prefetch_kvcache_pool[request_id]["unreused_positions"]
-                    batch_reused_positions.extend([i+prefix_seq_len for i in reused_positions])
-                    batch_unreused_positions.extend([i+prefix_seq_len for i in unreused_positions])
-                    prefix_seq_len += len(seq_group_metadata.seq_data[request_id].prompt_token_ids)
-                    select_token_indices.append(prefix_unreused_token_len+len(unreused_positions)-1)
-                    prefix_unreused_token_len += len(unreused_positions)
+                request_id = int(seq_group_metadata.request_id)
+                batch_target_kvcache.append(self.cpu_prefetch_kvcache_pool[request_id]["kvcache"])
+                reused_positions = self.cpu_prefetch_kvcache_pool[request_id]["reused_positions"]
+                unreused_positions = self.cpu_prefetch_kvcache_pool[request_id]["unreused_positions"]
+                batch_reused_positions.extend([i+prefix_seq_len for i in reused_positions])
+                batch_unreused_positions.extend([i+prefix_seq_len for i in unreused_positions])
+                prefix_seq_len += len(seq_group_metadata.seq_data[request_id].prompt_token_ids)
+                select_token_indices.append(prefix_unreused_token_len+len(unreused_positions)-1)
+                prefix_unreused_token_len += len(unreused_positions)
             batch_target_kvcache = torch.cat(batch_target_kvcache, dim=2)
-            batch_reused_positions = torch.tensor(batch_reused_positions,dtype=torch.int32)
-            batch_unreused_positions = torch.tensor(batch_unreused_positions,dtype=torch.int32)
-            # 
+            batch_reused_positions = torch.tensor(batch_reused_positions,dtype=torch.int32).to(batch_target_kvcache.device)
+            batch_unreused_positions = torch.tensor(batch_unreused_positions,dtype=torch.int32).to(batch_target_kvcache.device)
+            
+            
             self.model.model.old_kvs = batch_target_kvcache
             self.model.model.cache_fuse_metadata['reused_positions'] = batch_reused_positions
             self.model.model.cache_fuse_metadata['unreused_positions'] = batch_unreused_positions
