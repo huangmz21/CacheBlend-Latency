@@ -926,7 +926,7 @@ class ModelRunner:
 
         # =====================开始HACK 这里需要清空model_runner
         if attn_metadata.prefill_metadata is not None and self.model.model.cache_fuse_metadata['check']:
-            self.model.model.old_kvs = None
+            self.model.model.old_kvs = [None,None] * len(self.model.model.layers)
             self.cpu_prefetch_kvcache_pool = {}
             
 

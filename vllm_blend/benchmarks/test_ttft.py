@@ -191,7 +191,8 @@ class ShareLLM(LLM):
 
         current_request_id_start = self.request_counter.counter
         for idx, result in enumerate(results):
-            if len(result) > 0 and result[0]["distance"] >= 0.8:
+            if (len(result) > 0 and result[0]["distance"] >= 0.8 and cache_fuse_metadata['recompute_mode'] == 1) or \
+                (len(result) > 0 and result[0]["distance"] >= 0.99 and cache_fuse_metadata['recompute_mode'] in [0,2]):
                 kvcache_disk_path = result[0]["kvcache_disk_path"]
                 candidate_prompt = result[0]["prompt"]
                 target_prompt = prompts[idx]
@@ -341,19 +342,37 @@ if __name__ == "__main__":
     
     cache_fuse_metadata = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata
     
-    candidate_prompts = ["突然的升空又急速的落地.","My name is Huan Yang"]
-    target_prompts = ["我要飞的更高是什么歌的歌词","My name is Huan Yang, I come from China. What is your name?"]
+    candidate_prompts = ["My name is Huan Yang"]
+    target_prompts = ["My name is Huan Yang, I come from China. What is your name?" * 10]
     
+    short_sampling_params = [SamplingParams(temperature=0.0,max_tokens=1)]
+    long_sampling_params = [SamplingParams(temperature=0.0,max_tokens=128)]
     
     outputs = llm.precompute_generate(prompts=candidate_prompts,
-                                sampling_params=[SamplingParams(temperature=0.0,max_tokens=1),
-                                                SamplingParams(temperature=0.0,max_tokens=1)])
+                                sampling_params=short_sampling_params)
     
-    outputs = llm.cacheblend_generate(prompts=target_prompts,
-                                sampling_params=[SamplingParams(temperature=0.0,max_tokens=128),
-                                                SamplingParams(temperature=0.0,max_tokens=128)])
+    print("================ Cacheblend ================")
+    outputs = llm.cacheblend_generate(prompts=target_prompts,use_tqdm=False,
+                                sampling_params=long_sampling_params)
+    
     
     for output in outputs:
+        ttft = output.metrics.first_token_time - output.metrics.first_scheduled_time
         print(output.outputs[0].text)
+        print(ttft)
+        
+    print("================ KVShare ================")
+    outputs = llm.kvshare_generate(prompts=target_prompts,use_tqdm=False,
+                                sampling_params=long_sampling_params)
+    for output in outputs:
+        ttft = output.metrics.first_token_time - output.metrics.first_scheduled_time
+        print(output.outputs[0].text)
+        print(ttft)
 
-
+    print("================ Full Compute ================")
+    outputs = llm.generate(prompts=target_prompts,use_tqdm=False,
+                                sampling_params=long_sampling_params)
+    for output in outputs:
+        ttft = output.metrics.first_token_time - output.metrics.first_scheduled_time
+        print(output.outputs[0].text)
+        print(ttft)

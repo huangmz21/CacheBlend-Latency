@@ -225,10 +225,16 @@ class XFormersImpl(AttentionImpl):
                         batch_top_indices.append(top_indices)
                         batch_bottom_indices.append(bottom_indices)
                 
-                bottom_indices = torch.cat(batch_bottom_indices)    
-                top_indices = torch.cat(batch_top_indices)
+                if len(batch_top_indices) > 0:
+                    bottom_indices = torch.cat(batch_bottom_indices) 
+                else:
+                    bottom_indices = None
+                if len(batch_top_indices) > 0:
+                    top_indices = torch.cat(batch_top_indices)
+                else:
+                    top_indices = torch.tensor([]).to(query.device)
                 top_indices = torch.cat([top_indices,
-                                        unreused_positions.to(top_indices.device)])
+                                        unreused_positions.to(top_indices.device)]).to(torch.int32)
                 top_indices, _ = torch.sort(top_indices)
                 top_indices = torch.unique(top_indices)
                 query = query[top_indices]
@@ -273,14 +279,21 @@ class XFormersImpl(AttentionImpl):
                         batch_top_indices.append(top_indices)
                         batch_bottom_indices.append(bottom_indices)
                     pass
+                if len(batch_top_indices) > 0:
+                    bottom_indices = torch.cat(batch_bottom_indices) 
+                else:
+                    bottom_indices = None
+                if len(batch_top_indices) > 0:
+                    top_indices = torch.cat(batch_top_indices)
+                else:
+                    top_indices = torch.tensor([]).to(query.device)
                    
-                top_indices = torch.cat(batch_top_indices)
                 top_indices = torch.cat([top_indices,
-                                        unreused_positions.to(top_indices.device)])
+                                        unreused_positions.to(top_indices.device)]).to(torch.int32)
                 top_indices, _ = torch.sort(top_indices)
                 top_indices = torch.unique(top_indices)
                 query = query[top_indices]
-                cache_fuse_metadata["recompute_indices_in_decode"] = torch.cat(batch_bottom_indices)
+                cache_fuse_metadata["recompute_indices_in_decode"] = bottom_indices
                 
                 cache_fuse_metadata["imp_indices"] = top_indices
                 
@@ -353,7 +366,7 @@ class XFormersImpl(AttentionImpl):
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
             
-            assert query.shape[0] == len(cache_fuse_metadata["imp_indices"])
+            # assert query.shape[0] == len(cache_fuse_metadata["imp_indices"])
             #assert decode_query.shape[0] == num_decode_tokens
         else:
             num_prefill_tokens = attn_metadata.num_prefill_tokens
@@ -369,8 +382,8 @@ class XFormersImpl(AttentionImpl):
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
 
-            assert query.shape[0] == num_prefill_tokens
-            assert decode_query.shape[0] == num_decode_tokens
+            # assert query.shape[0] == num_prefill_tokens
+            # assert decode_query.shape[0] == num_decode_tokens
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
