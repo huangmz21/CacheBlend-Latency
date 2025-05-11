@@ -457,7 +457,7 @@ def test_single_process_performance():
 
 def match_sequences(target_token_ids, candidate_token_ids, window_size=5):
     """
-    计算两个token序列之间的匹配关系
+    计算两个token序列之间的匹配关系，允许候选序列中的位置重复匹配
     
     Args:
         target_token_ids: 目标token序列
@@ -493,8 +493,7 @@ def match_sequences(target_token_ids, candidate_token_ids, window_size=5):
     # 初始化结果
     target_matches = []
     candidate_matches = []
-    target_matched = set()
-    candidate_matched = set()
+    target_matched = set()  # 只保留目标序列的匹配记录
     
     # 构建目标序列的哈希索引
     target_hash_index = {}
@@ -520,17 +519,15 @@ def match_sequences(target_token_ids, candidate_token_ids, window_size=5):
                            target_token_ids[i + match_length] == candidate_token_ids[j + match_length]):
                         match_length += 1
                     
-                    # 记录匹配位置，确保对应位置的token相同且未被匹配过
+                    # 记录匹配位置，只检查目标序列中的位置是否已被匹配
                     for k in range(match_length):
                         t_idx = i + k
                         c_idx = j + k
                         if (t_idx not in target_matched and 
-                            c_idx not in candidate_matched and 
                             target_token_ids[t_idx] == candidate_token_ids[c_idx]):
                             target_matches.append(t_idx)
                             candidate_matches.append(c_idx)
                             target_matched.add(t_idx)
-                            candidate_matched.add(c_idx)
     
     # 验证结果
     assert len(target_matches) == len(candidate_matches), "匹配列表长度不一致"
@@ -591,12 +588,14 @@ def test_match_sequences():
 
 if __name__=="__main__":
     # 运行序列匹配测试
-    test_match_sequences()
+    # test_match_sequences()
     
     # 运行单进程性能测试
     # test_single_process_performance()
     
     # # 运行多进程性能测试
     # test_multi_process_performance()
-    
+    a = [1,2,3,4,5,6,7,8,9,10]
+    b = [1,2,3,4,5,6,7,8,9,10]*10
+    print(match_sequences(a,b))
 

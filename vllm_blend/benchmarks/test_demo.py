@@ -188,10 +188,10 @@ class ShareLLM(LLM):
             output_fields=["prompt","kvcache_disk_path"]
         )
         # dtype = torch.bfloat16 if self.llm_engine.model_config.dtype == "bfloat16" else torch.float16
-
+        # recompute: 0 ,
         current_request_id_start = self.request_counter.counter
         for idx, result in enumerate(results):
-            if (len(result) > 0 and result[0]["distance"] >= 0.8 and cache_fuse_metadata['recompute_mode'] == 1) or \
+            if (len(result) > 0 and result[0]["distance"] >= 0.5 and cache_fuse_metadata['recompute_mode'] == 1) or \
                 (len(result) > 0 and result[0]["distance"] >= 0.99 and cache_fuse_metadata['recompute_mode'] in [0,2]):
                 kvcache_disk_path = result[0]["kvcache_disk_path"]
                 candidate_prompt = result[0]["prompt"]
@@ -325,16 +325,6 @@ class ShareLLM(LLM):
 
         return self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
 
-# def benchmark_ttft(llm: ShareLLM,prompts: List[str],sampling_params: List[SamplingParams]):
-#     """
-#     计算TTFT
-#     """
-#     outputs = llm.precompute_generate(prompts=prompts,
-#                                 sampling_params=sampling_params)
-#     outputs = llm.share_generate(prompts=prompts,
-#                                 sampling_params=sampling_params)
-#     return outputs
-
 
 if __name__ == "__main__":
     
@@ -342,8 +332,8 @@ if __name__ == "__main__":
     
     cache_fuse_metadata = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata
     
-    candidate_prompts = ["My name is Huan Yang"]
-    target_prompts = ["My name is Huan Yang, I come from China. What is your name?" * 10]
+    candidate_prompts = ["My name is Huan Yang, I come from China. What is your name? "]
+    target_prompts = ["My name is Huan Yang, I come from China. What is your name? " * 100]
     
     short_sampling_params = [SamplingParams(temperature=0.0,max_tokens=1)]
     long_sampling_params = [SamplingParams(temperature=0.0,max_tokens=128)]
@@ -352,27 +342,51 @@ if __name__ == "__main__":
                                 sampling_params=short_sampling_params)
     
     print("================ Cacheblend ================")
-    outputs = llm.cacheblend_generate(prompts=target_prompts,use_tqdm=False,
-                                sampling_params=long_sampling_params)
-    
-    
-    for output in outputs:
-        ttft = output.metrics.first_token_time - output.metrics.first_scheduled_time
-        print(output.outputs[0].text)
-        print(ttft)
+    avg_ttft = []
+    for _ in range(10):
+        outputs = llm.cacheblend_generate(prompts=target_prompts,use_tqdm=False,
+                                    sampling_params=long_sampling_params)
+        
+        
+        for output in outputs:
+            ttft = output.metrics.first_token_time - output.metrics.first_scheduled_time
+            # print(output.outputs[0].text)
+            # print(ttft)
+            avg_ttft.append(ttft)
+    print(avg_ttft)
+    print(sum(avg_ttft)/len(avg_ttft))
         
     print("================ KVShare ================")
-    outputs = llm.kvshare_generate(prompts=target_prompts,use_tqdm=False,
-                                sampling_params=long_sampling_params)
-    for output in outputs:
-        ttft = output.metrics.first_token_time - output.metrics.first_scheduled_time
-        print(output.outputs[0].text)
-        print(ttft)
+    avg_ttft = []
+    for _ in range(10):
+        outputs = llm.kvshare_generate(prompts=target_prompts,use_tqdm=False,
+                                    sampling_params=long_sampling_params)
+        
+        for output in outputs:
+            ttft = output.metrics.first_token_time - output.metrics.first_scheduled_time
+            avg_ttft.append(ttft)
+    print(avg_ttft)
+    print(sum(avg_ttft)/len(avg_ttft))
 
+
+    print("================ Naive ================")
+    avg_ttft = []
+    for _ in range(10):
+        outputs = llm.naive_generate(prompts=target_prompts,use_tqdm=False,
+                                    sampling_params=long_sampling_params)
+        
+        for output in outputs:
+            ttft = output.metrics.first_token_time - output.metrics.first_scheduled_time
+            avg_ttft.append(ttft)
+    print(sum(avg_ttft)/len(avg_ttft))
     print("================ Full Compute ================")
-    outputs = llm.generate(prompts=target_prompts,use_tqdm=False,
+    avg_ttft = []
+    for _ in range(10):
+        outputs = llm.generate(prompts=target_prompts,use_tqdm=False,
                                 sampling_params=long_sampling_params)
-    for output in outputs:
-        ttft = output.metrics.first_token_time - output.metrics.first_scheduled_time
-        print(output.outputs[0].text)
-        print(ttft)
+        
+        for output in outputs:
+            ttft = output.metrics.first_token_time - output.metrics.first_scheduled_time
+            avg_ttft.append(ttft)
+    print(avg_ttft)
+    print(sum(avg_ttft)/len(avg_ttft))
