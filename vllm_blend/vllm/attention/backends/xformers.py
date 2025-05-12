@@ -15,6 +15,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
+import time
 
 logger = init_logger(__name__)
 
@@ -212,18 +213,63 @@ class XFormersImpl(AttentionImpl):
                 # temp_diff = torch.sum((value[reused_positions,:,:]-value_old[reused_positions,:,:])**2, dim=[1,2])
                 # top_indices = torch.topk(temp_diff, k=topk_num).indices
                 # bottom_indices = torch.topk(temp_diff, k=int(len(reused_positions)*(1-cache_fuse_metadata["recomp_ratio"])), largest=False).indices
+                xx=1
+                # NOTE(mingzhe) 原版代码===============================
+                # blend_start_time = time.time()
+                # batch_top_indices = []
+                # batch_bottom_indices = []
+                # for idx,start_loc in enumerate(attn_metadata.prefill_metadata.subquery_start_loc[:-1]):
+                #     end_loc = attn_metadata.prefill_metadata.subquery_start_loc[idx+1]
+                #     sub_reused_positions = torch.where((reused_positions>=start_loc) & (reused_positions<end_loc))[0]
+                #     if len(sub_reused_positions) > 0:
+                #         topk_num = max(1, int(len(sub_reused_positions)*cache_fuse_metadata["recomp_ratio"]))
+                #         temp_diff = torch.sum((value[sub_reused_positions,:,:]-value_old[sub_reused_positions,:,:])**2, dim=[1,2])
+                #         top_indices = torch.topk(temp_diff, k=topk_num).indices + start_loc
+                #         bottom_indices = torch.topk(temp_diff, k=len(sub_reused_positions)-topk_num, largest=False).indices
+                #         batch_top_indices.append(top_indices)
+                #         batch_bottom_indices.append(bottom_indices)
+                
+                # if len(batch_top_indices) > 0:
+                #     bottom_indices = torch.cat(batch_bottom_indices) 
+                # else:
+                #     bottom_indices = None
+                # if len(batch_top_indices) > 0:
+                #     top_indices = torch.cat(batch_top_indices)
+                # else:
+                #     top_indices = torch.tensor([]).to(query.device)
+                # top_indices = torch.cat([top_indices,
+                #                         unreused_positions.to(top_indices.device)]).to(torch.int32)
+                # top_indices, _ = torch.sort(top_indices)
+                # # top_indices = torch.unique(top_indices)
+                # query = query[top_indices]
+                # cache_fuse_metadata["imp_indices"] = top_indices
+                # cache_fuse_metadata["recompute_indices_in_decode"] = bottom_indices
+                # blend_end_time = time.time()
+                # blend_spend_time = blend_end_time - blend_start_time
+                # NOTE(mingzhe) 原版代码======================================
+
+                #NOTE(mingzhe) 新版代码========================================
+                blend_start_time = time.time()
+                temp_diff = torch.sum((value-value_old)**2, dim=[1,2])
+                subquery_starts = attn_metadata.prefill_metadata.subquery_start_loc[:-1]
+                subquery_ends = attn_metadata.prefill_metadata.subquery_start_loc[1:]
                 batch_top_indices = []
                 batch_bottom_indices = []
-                for idx,start_loc in enumerate(attn_metadata.prefill_metadata.subquery_start_loc[:-1]):
-                    end_loc = attn_metadata.prefill_metadata.subquery_start_loc[idx+1]
-                    sub_reused_positions = torch.where((reused_positions>=start_loc) & (reused_positions<end_loc))[0]
-                    if len(sub_reused_positions) > 0:
-                        topk_num = max(1, int(len(sub_reused_positions)*cache_fuse_metadata["recomp_ratio"]))
-                        temp_diff = torch.sum((value[sub_reused_positions,:,:]-value_old[sub_reused_positions,:,:])**2, dim=[1,2])
-                        top_indices = torch.topk(temp_diff, k=topk_num).indices
-                        bottom_indices = torch.topk(temp_diff, k=int(len(sub_reused_positions)*(1-cache_fuse_metadata["recomp_ratio"])), largest=False).indices
-                        batch_top_indices.append(top_indices)
-                        batch_bottom_indices.append(bottom_indices)
+                # 获取 reused_positions 对应的子查询索引
+                reused_positions = reused_positions.to(query.device)
+                indices = torch.bucketize(reused_positions, subquery_ends,right=True)
+                unique_indices, start_indices = torch.unique_consecutive(indices, return_inverse=True)
+                batch_sizes = torch.bincount(start_indices)
+                splits = torch.split(reused_positions, batch_sizes.tolist())
+                for i, split in enumerate(splits):
+                    temp_diff_tmp = temp_diff[split]
+                    topk_num = max(1, int(len(temp_diff_tmp)*cache_fuse_metadata["recomp_ratio"]))
+                    top_indices = torch.topk(temp_diff_tmp, k=topk_num).indices + subquery_starts[i]
+                    full_indices = torch.arange(len(split), device=temp_diff.device) + subquery_starts[i]
+                    bottom_indices = full_indices[~torch.isin(full_indices, top_indices)]
+                   
+                    batch_top_indices.append(top_indices)
+                    batch_bottom_indices.append(bottom_indices)
                 
                 if len(batch_top_indices) > 0:
                     bottom_indices = torch.cat(batch_bottom_indices) 
@@ -236,12 +282,18 @@ class XFormersImpl(AttentionImpl):
                 top_indices = torch.cat([top_indices,
                                         unreused_positions.to(top_indices.device)]).to(torch.int32)
                 top_indices, _ = torch.sort(top_indices)
-                top_indices = torch.unique(top_indices)
                 query = query[top_indices]
                 cache_fuse_metadata["imp_indices"] = top_indices
                 cache_fuse_metadata["recompute_indices_in_decode"] = bottom_indices
+                blend_end_time = time.time()
+                blend_new_spend_time = blend_end_time - blend_start_time
+                    
+
+
+                #NOTE(mingzhe) 新版代码========================================
+                xx = 1
                 
-                
+            
             # kvshare模式
             elif cache_fuse_metadata["recompute_mode"] == 1:
                 
@@ -276,7 +328,6 @@ class XFormersImpl(AttentionImpl):
                         bottom_indices = torch.topk(metric, k=int(len(sub_reused_positions)*(1-cache_fuse_metadata["recomp_ratio"])), largest=False).indices[0]
                         batch_top_indices.append(top_indices)
                         batch_bottom_indices.append(bottom_indices)
-                
                     
                 if len(batch_top_indices) > 0:
                     bottom_indices = torch.cat(batch_bottom_indices) 
@@ -297,24 +348,9 @@ class XFormersImpl(AttentionImpl):
                 cache_fuse_metadata["imp_indices"] = top_indices
                 
             # EPIC模式: 2, 在外部预处理即可
-            elif cache_fuse_metadata["recompute_mode"] ==2:
-                # EPCI切掉前面的几个token即可
-                batch_top_indices = []
-                batch_bottom_indices = []
-                for idx,start_loc in enumerate(attn_metadata.prefill_metadata.subquery_start_loc[:-1]):
-                    # 确保在每一个子batch中计算attention
-                   
-                    end_loc = attn_metadata.prefill_metadata.subquery_start_loc[idx+1]
-                    sub_unreused_positions = torch.where((unreused_positions>=start_loc) & (unreused_positions<end_loc))[0]
-                    sub_reused_positions = torch.where((reused_positions>=start_loc) & (reused_positions<end_loc))[0]
-            
-                    
-                    if len(sub_unreused_positions) > 0 and len(sub_reused_positions) > 0:
-                        topk_num = max(1, int(len(sub_reused_positions)*cache_fuse_metadata["recomp_ratio"]))
-                        top_indices = sub_reused_positions[:topk_num]
-                        batch_top_indices.append(top_indices)
-                
-            elif cache_fuse_metadata["recompute_mode"] ==3:
+            # Naive模式, FULL KV REUSE: 3
+            elif cache_fuse_metadata["recompute_mode"] in [2,3]:
+                # 全量更新
                 top_indices = unreused_positions.to(query.device)
                 query = query[top_indices]
                 cache_fuse_metadata["imp_indices"] = top_indices
