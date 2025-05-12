@@ -19,7 +19,7 @@ import os
 from edit2 import TokenMatch, match_sequences
 import uuid
 import argparse
-os.environ["VLLM_USE_MODELSCOPE"] = "False"
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
 import json
 import threading
 import queue
@@ -116,6 +116,7 @@ class ShareLLM(LLM):
         self.output_token_recorders = {}
         self.tokenizer = self.get_tokenizer()
         self.engine_running = True
+        self.token_hit = []
     
     def generate(
         self,
@@ -278,7 +279,8 @@ class ShareLLM(LLM):
                 target_kvcache = torch.zeros([candidate_kvcache.shape[0],candidate_kvcache.shape[1],len(target_token_ids),candidate_kvcache.shape[-1]],device="cpu",dtype=torch.float16)
                 target_matched_idx, candidate_matched_idx = match_sequences(target_token_ids, candidate_token_ids)
                 
-                
+                len_target_token_ids = len(target_token_ids)
+                self.token_hit.append( len(target_matched_idx) / len(target_token_ids))
                 
                 target_kvcache[:,:,target_matched_idx,:] = candidate_kvcache[:,:,candidate_matched_idx,:].to(torch.float16)
                 
@@ -466,9 +468,9 @@ class ShareLLM(LLM):
                     if output.request_id in self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool:
                         output.hack_kvs = self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool[output.request_id]
                         self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool.pop(output.request_id)
-                    
-                    output.metrics.first_scheduled_time = self.llm_engine.model_executor.driver_worker.model_runner.real_schedule_time[output.request_id]
-                    output.metrics.first_token_time = self.llm_engine.model_executor.driver_worker.model_runner.real_first_token_time[output.request_id]
+                    if output.request_id in self.llm_engine.model_executor.driver_worker.model_runner.real_schedule_time and output.request_id in self.llm_engine.model_executor.driver_worker.model_runner.real_first_token_time:
+                        output.metrics.first_scheduled_time = self.llm_engine.model_executor.driver_worker.model_runner.real_schedule_time[output.request_id]
+                        output.metrics.first_token_time = self.llm_engine.model_executor.driver_worker.model_runner.real_first_token_time[output.request_id]
                     outputs.append(output)
                     if use_tqdm and requests:
                         pbar.update(1)
@@ -488,6 +490,7 @@ class ShareLLM(LLM):
         
         # 打印性能指标
         print("===============================================================================")
+        print(f"token_hit: {np.mean(self.token_hit)}")
         print(f"计算模式: {compute_mode}")
         print(f"QPS: {rate}")
         print("\n性能指标统计:")
@@ -507,6 +510,7 @@ class ShareLLM(LLM):
         print(f"中位数TPOT: {metrics['median_tpot_ms']:.2f}ms")
         print(f"P99 TPOT: {metrics['p99_tpot_ms']:.2f}ms")
         print("===============================================================================") 
+        self.token_hit = []
         return outputs
 
     def sync_run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
@@ -606,7 +610,7 @@ if __name__ == "__main__":
     parser.add_argument('--rate', type=float, default=10.0,
                       help='请求发送速率 (请求/秒)')
     parser.add_argument('--model-path', type=str, 
-                      default="/root/.cache/modelscope/hub/models/01ai/Yi-34B-Chat-4bits",
+                      default="/root/.cache/modelscope/hub/models/LLM-Research/Meta-Llama-3.1-8B-Instruct",
                       help='模型路径')
     parser.add_argument('--num-requests', type=int, default=128,
                       help='要处理的请求数量')
@@ -616,7 +620,8 @@ if __name__ == "__main__":
     llm = ShareLLM(model=args.model_path,
                   device="cuda:0",
                   dtype="float16",
-                  gpu_memory_utilization=0.7)
+                  max_model_len= 32768,
+                  gpu_memory_utilization=0.8)
     cache_fuse_metadata = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata
     
     # 加载数据
@@ -624,19 +629,13 @@ if __name__ == "__main__":
     data = json.load(open(data_path))
     targets = data["targets"][:args.num_requests]
     
-    print(f"开始处理 {len(targets)} 个请求，速率为 {args.rate} 请求/s")
+    # print(f"开始处理 {len(targets)} 个请求，速率为 {args.rate} 请求/s")
     print(f"使用计算模式: {args.compute_mode}")
     
-    # # 替换原有的generate函数
-    # # llm.generate = custom_generate
-    # compute_mode = args.compute_mode
-    
+
     # 运行引擎
-    # print("model_path: ", args.model_path)
-    # print("num_requests: ", args.num_requests)
-    # print("rate: ", args.rate)
-    # print("compute_mode: ", compute_mode)
-    for mode in [0]:
-        for rate in [20,24,28,32]:
+    # FIXME(Huan Yang): 每次都是359请求找不大 
+    for mode in [2]:
+        for rate in [2,4,8,10,12,14,16,24]:
             outputs = llm._run_engine(use_tqdm=True, rate=rate, requests=targets, compute_mode=mode)
     
