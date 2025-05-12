@@ -930,9 +930,9 @@ class ModelRunner:
         if attn_metadata.decode_metadata:
             self.model.model.cache_fuse_metadata['check'] = False
         # 记录每个请求的实际调度时间
-        if attn_metadata.prefill_metadata:
-            for seq_group_metadata in seq_group_metadata_list:
-                # if seq_group_metadata.request_id not in self.real_schedule_time and seq_group_metadata.is_prompt:
+        # if attn_metadata.prefill_metadata:
+        for seq_group_metadata in seq_group_metadata_list:
+            if seq_group_metadata.is_prompt:
                 self.real_schedule_time[seq_group_metadata.request_id] = time.time()
 
         start_time = time.time()
@@ -1009,9 +1009,9 @@ class ModelRunner:
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
-        if attn_metadata.prefill_metadata:
-            for seq_group_metadata in seq_group_metadata_list:
-                # if seq_group_metadata.request_id not in self.real_first_token_time and seq_group_metadata.is_prompt:
+        # if attn_metadata.prefill_metadata:
+        for seq_group_metadata in seq_group_metadata_list:
+            if seq_group_metadata.is_prompt:
                 self.real_first_token_time[seq_group_metadata.request_id] = time.time()
             # print(hidden_states.shape)
         return output

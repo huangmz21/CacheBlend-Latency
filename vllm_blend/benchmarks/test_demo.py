@@ -336,7 +336,8 @@ class ShareLLM(LLM):
 
 
 if __name__ == "__main__":
-    model_name = "/root/.cache/modelscope/hub/models/01ai/Yi-34B-Chat-4bits"
+    # model_name = "/root/.cache/modelscope/hub/models/01ai/Yi-34B-Chat-4bits"
+    model_name = "/root/.cache/modelscope/hub/models/LLM-Research/Meta-Llama-3.1-8B-Instruct"
     llm = ShareLLM(model=model_name,device="cuda:0",dtype="float16")
     
     cache_fuse_metadata = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata

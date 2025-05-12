@@ -427,11 +427,16 @@ class ShareLLM(LLM):
                         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
                     )
                 elif compute_mode == 3:
+                    self.epic_generate(
+                        prompts=prompts,
+                        sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
+                    )
+                elif compute_mode == 4:
                     self.naive_generate(
                         prompts=prompts,
                         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
                     )
-            if compute_mode  in [1,2,3]:
+            if compute_mode  in [1,2,3,4]:
                 cache_fuse_metadata['collect'] = False
                 cache_fuse_metadata['check'] = True
             #     self.cacheblend_generate(
@@ -461,6 +466,7 @@ class ShareLLM(LLM):
                     if output.request_id in self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool:
                         output.hack_kvs = self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool[output.request_id]
                         self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool.pop(output.request_id)
+                    
                     output.metrics.first_scheduled_time = self.llm_engine.model_executor.driver_worker.model_runner.real_schedule_time[output.request_id]
                     output.metrics.first_token_time = self.llm_engine.model_executor.driver_worker.model_runner.real_first_token_time[output.request_id]
                     outputs.append(output)
@@ -474,10 +480,16 @@ class ShareLLM(LLM):
         end_time = time.time()
         total_duration = end_time - start_time - self.llm_engine.model_executor.driver_worker.model_runner.prefetch_time
         self.llm_engine.model_executor.driver_worker.model_runner.prefetch_time = 0
+        self.llm_engine.model_executor.driver_worker.model_runner.real_schedule_time = {}
+        self.llm_engine.model_executor.driver_worker.model_runner.real_first_token_time = {}
+
         # 计算性能指标
         metrics = self.calculate_metrics(outputs, total_duration)
         
         # 打印性能指标
+        print("===============================================================================")
+        print(f"计算模式: {compute_mode}")
+        print(f"QPS: {rate}")
         print("\n性能指标统计:")
         print(f"总运行时间: {total_duration:.2f}秒")
         print(f"完成请求数: {metrics['completed']}")
@@ -494,7 +506,7 @@ class ShareLLM(LLM):
         print(f"平均TPOT: {metrics['mean_tpot_ms']:.2f}ms")
         print(f"中位数TPOT: {metrics['median_tpot_ms']:.2f}ms")
         print(f"P99 TPOT: {metrics['p99_tpot_ms']:.2f}ms")
-            
+        print("===============================================================================") 
         return outputs
 
     def sync_run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
@@ -596,7 +608,7 @@ if __name__ == "__main__":
     parser.add_argument('--model-path', type=str, 
                       default="/root/.cache/modelscope/hub/models/01ai/Yi-34B-Chat-4bits",
                       help='模型路径')
-    parser.add_argument('--num-requests', type=int, default=30,
+    parser.add_argument('--num-requests', type=int, default=128,
                       help='要处理的请求数量')
     args = parser.parse_args()
     
@@ -615,14 +627,16 @@ if __name__ == "__main__":
     print(f"开始处理 {len(targets)} 个请求，速率为 {args.rate} 请求/s")
     print(f"使用计算模式: {args.compute_mode}")
     
-    # 替换原有的generate函数
-    # llm.generate = custom_generate
-    compute_mode = args.compute_mode
+    # # 替换原有的generate函数
+    # # llm.generate = custom_generate
+    # compute_mode = args.compute_mode
     
     # 运行引擎
-    print("model_path: ", args.model_path)
-    print("num_requests: ", args.num_requests)
-    print("rate: ", args.rate)
-    print("compute_mode: ", compute_mode)
-    outputs = llm._run_engine(use_tqdm=True, rate=args.rate, requests=targets, compute_mode=compute_mode)
+    # print("model_path: ", args.model_path)
+    # print("num_requests: ", args.num_requests)
+    # print("rate: ", args.rate)
+    # print("compute_mode: ", compute_mode)
+    for mode in [0]:
+        for rate in [20,24,28,32]:
+            outputs = llm._run_engine(use_tqdm=True, rate=rate, requests=targets, compute_mode=mode)
     
