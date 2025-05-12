@@ -244,11 +244,13 @@ class ShareLLM(LLM):
         这一个批次全部都需要做部分token的计算
         """
         # =================== HACK 这里预计算好所有信息,在ADD_REQUEST的时候,直接使用
-        cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['check'] = True
+        # cache_fuse_metadata['collect'] = False
+        # cache_fuse_metadata['check'] = True
         
         # 在这里计算出全部的可以复用KV的位置
         batch_text_embedding = self.sentence_llm.encode(prompts)
+        # 强制reshape
+        batch_text_embedding = batch_text_embedding.reshape(len(prompts),-1)
         # 查询相似请求的KVCache
         results = self.client.search(
             collection_name=self.collection_name,
@@ -259,9 +261,11 @@ class ShareLLM(LLM):
         # dtype = torch.bfloat16 if self.llm_engine.model_config.dtype == "bfloat16" else torch.float16
         # recompute: 0 ,
         current_request_id_start = self.request_counter.counter
-        for idx, result in enumerate(results):
+        
+        # 添加进度条
+        for idx, result in tqdm(enumerate(results), total=len(results), desc="处理KV Cache匹配"):
             if (len(result) > 0 and result[0]["distance"] >= 0.5 and cache_fuse_metadata['recompute_mode'] == 1) or \
-                (len(result) > 0 and result[0]["distance"] >= 0.99 and cache_fuse_metadata['recompute_mode'] in [0,2]):
+                (len(result) > 0 and result[0]["distance"] >= 0.5 and cache_fuse_metadata['recompute_mode'] in [0,2]):
                 kvcache_disk_path = result[0]["kvcache_disk_path"]
                 candidate_prompt = result[0]["prompt"]
                 target_prompt = prompts[idx]
@@ -281,7 +285,7 @@ class ShareLLM(LLM):
                     target_matched_idx.remove(len(target_token_ids) -1)
                 
                 self.llm_engine.model_executor.driver_worker.model_runner.cpu_prefetch_kvcache_pool[current_request_id_start+idx] = {
-                    "kvcache": target_kvcache.to(self.llm_engine.model_executor.driver_worker.model_runner.device),
+                    "kvcache": target_kvcache,
                     "reused_positions": [i for i in range(len(target_token_ids)) if i in target_matched_idx],
                     "unreused_positions": [i for i in range(len(target_token_ids)) if i not in target_matched_idx]
                 }
@@ -291,7 +295,7 @@ class ShareLLM(LLM):
                 # NOTE 注意修改变量
                 target_kvcache = torch.zeros([32,2,len(target_token_ids),1024],device="cpu",dtype=torch.bfloat16)
                 self.llm_engine.model_executor.driver_worker.model_runner.cpu_prefetch_kvcache_pool[current_request_id_start+idx] = {
-                    "kvcache": target_kvcache.to(self.llm_engine.model_executor.driver_worker.model_runner.device),
+                    "kvcache": target_kvcache,
                     "reused_positions": [],
                     "unreused_positions": [i for i in range(len(target_token_ids))]
                 }
@@ -402,10 +406,16 @@ class ShareLLM(LLM):
             
             # 处理请求
             if prompts:
-                self.generate(
+                # self.generate(
+                #     prompts=prompts,
+                #     sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
+                # )
+                self.cacheblend_generate(
                     prompts=prompts,
                     sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
                 )
+            cache_fuse_metadata['collect'] = False
+            cache_fuse_metadata['check'] = True
             
             # 记录step开始时间
             step_start_time = time.time()
@@ -424,6 +434,8 @@ class ShareLLM(LLM):
                     if output.request_id in self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool:
                         output.hack_kvs = self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool[output.request_id]
                         self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool.pop(output.request_id)
+                    # output.metrics.first_scheduled_time = self.llm_engine.model_executor.driver_worker.model_runner.real_schedule_time[output.request_id]
+                    # output.metrics.first_token_time = self.llm_engine.model_executor.driver_worker.model_runner.real_first_token_time[output.request_id]
                     outputs.append(output)
                     if use_tqdm and requests:
                         pbar.update(1)
@@ -431,7 +443,7 @@ class ShareLLM(LLM):
         if use_tqdm and requests:
             pbar.close()
             
-        # 计算总运行时间
+        # 计算总运行时间（只包含step的时间）
         end_time = time.time()
         total_duration = end_time - start_time
         
@@ -492,8 +504,8 @@ class ShareLLM(LLM):
         """
         
         """
-        cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['check'] = False
+        # cache_fuse_metadata['collect'] = False
+        # cache_fuse_metadata['check'] = False
         cache_fuse_metadata['recompute_mode'] = 0
         
         self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
@@ -508,8 +520,8 @@ class ShareLLM(LLM):
         """
         
         """
-        cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['check'] = False
+        # cache_fuse_metadata['collect'] = False
+        # cache_fuse_metadata['check'] = False
         cache_fuse_metadata['recompute_mode'] = 2
 
         self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
@@ -552,7 +564,7 @@ if __name__ == "__main__":
     llm = ShareLLM(model="/root/.cache/huggingface/hub/models--mistralai--Mistral-7B-Instruct-v0.2/snapshots/3ad372fc79158a2148299e3318516c786aeded6c",
                     device="cuda:0",
                     dtype="bfloat16",
-                    gpu_memory_utilization=0.8)
+                    gpu_memory_utilization=0.7)
     cache_fuse_metadata = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata
     
     data_path = "/root/code/vllm_plus/examples/dataset/data/sharegpt/sharegpt90k_text_triplets.json"
@@ -562,19 +574,29 @@ if __name__ == "__main__":
     
     # =================== 预计算 ======================
     # candiates = data["candidates"]
-    # # batch 32个一起提交
-    
+
     # total_batches = (len(candiates) + batch_size - 1) // batch_size
     # for i in tqdm(range(0, len(candiates), batch_size), total=total_batches, desc="Processing batches"):
     #     batch_prompts = candiates[i:i + batch_size]
     #     llm.precompute_generate(batch_prompts, sampling_params=SamplingParams(max_tokens=1, temperature=0.0))
     
-    targets = data["targets"]
+    # ================== 离线batch计算 ==================
     
-    # 设置请求发送速率 (秒/请求)
-    rate = 2
+    targets = data["targets"][:64]
     
-    print(f"开始处理 {len(targets)} 个请求，速率为 {rate}s/请求")
+    # total_batches = (len(targets) + batch_size - 1) // batch_size
+    
+    # for i in tqdm(range(0, len(targets), batch_size), total=total_batches, desc="Processing batches"):
+    #     batch_prompts = targets[i:i + batch_size]
+    #     llm.naive_generate(batch_prompts, sampling_params=SamplingParams(max_tokens=1, temperature=0.0))
+    #     llm.sync_run_engine(use_tqdm=False)
+    
+    # targets = data["targets"]
+    
+    # 设置请求发送速率 (请求/s)
+    rate = 8
+    
+    print(f"开始处理 {len(targets)} 个请求，速率为 {rate} 请求/s")
     
     # 直接将所有请求发送给_run_engine函数处理
     outputs = llm._run_engine(use_tqdm=True, rate=rate, requests=targets)

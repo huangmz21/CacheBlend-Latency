@@ -177,6 +177,8 @@ class ModelRunner:
         # 存的是request_id 和 hack_kvs
         self.cpu_hack_kvcache_pool = {}
         self.cpu_prefetch_kvcache_pool = {}
+        self.real_schedule_time = {}
+        self.real_first_token_time = {}
         
 
     def load_model(self) -> None:
@@ -901,8 +903,7 @@ class ModelRunner:
             select_token_indices = []
             prefix_unreused_token_len = 0
             
-            
-            
+
             for seq_group_metadata in seq_group_metadata_list:
                 request_id = int(seq_group_metadata.request_id)
                 batch_target_kvcache.append(self.cpu_prefetch_kvcache_pool[request_id]["kvcache"])
@@ -918,17 +919,31 @@ class ModelRunner:
             batch_unreused_positions = torch.tensor(batch_unreused_positions,dtype=torch.int32).to(batch_target_kvcache.device)
             
             
-            self.model.model.old_kvs = batch_target_kvcache
-            self.model.model.cache_fuse_metadata['reused_positions'] = batch_reused_positions
-            self.model.model.cache_fuse_metadata['unreused_positions'] = batch_unreused_positions
+            self.model.model.old_kvs = batch_target_kvcache.to(self.device)
+            self.model.model.cache_fuse_metadata['reused_positions'] = batch_reused_positions.to(self.device)
+            self.model.model.cache_fuse_metadata['unreused_positions'] = batch_unreused_positions.to(self.device)
 
+        # 异步计算下强制设置check为False，以防报错
+        if attn_metadata.decode_metadata:
+            self.model.model.cache_fuse_metadata['check'] = False
+        # 记录每个请求的实际调度时间
+        if attn_metadata.prefill_metadata:
+            for seq_group_metadata in seq_group_metadata_list:
+                # if seq_group_metadata.request_id not in self.real_schedule_time and seq_group_metadata.is_prompt:
+                self.real_schedule_time[seq_group_metadata.request_id] = time.time()
+
+        start_time = time.time()
         hidden_states = model_executable(**execute_model_kwargs)
+        end_time = time.time()
+        if attn_metadata.prefill_metadata:
+            print(f"model forward time: {end_time - start_time}s")
 
         # =====================开始HACK 这里需要清空model_runner
         if attn_metadata.prefill_metadata is not None and self.model.model.cache_fuse_metadata['check']:
-            self.model.model.old_kvs = [None,None] * len(self.model.model.layers)
-            self.cpu_prefetch_kvcache_pool = {}
-            
+            self.model.model.old_kvs = [[None,None]] * len(self.model.model.layers)
+            # self.cpu_prefetch_kvcache_pool = {}
+            for seq_group_metadata in seq_group_metadata_list:
+                self.cpu_prefetch_kvcache_pool[seq_group_metadata.request_id] = None
 
         # 在Prefill中根据当前的请求的顺序，重新将HACK的KV 提取出来
         if attn_metadata.prefill_metadata is not None and self.model.model.cache_fuse_metadata['collect']:
@@ -951,13 +966,7 @@ class ModelRunner:
 
                 self.cpu_hack_kvcache_pool[seq_group_metadata.request_id] = current_seq_hack_kvs
                 past_seq_len += len(seq_data)
-        pass
-        
-        
-         
-         
-         
-         
+ 
         # HACK(Jiayi): only use cpu local store
         # Cache engine: gather the kv cache and store it to cache engine
         # if self.cache_engine is not None and \
@@ -979,6 +988,8 @@ class ModelRunner:
         if self.model.model.cache_fuse_metadata['check']:
             temp_data = sampling_metadata.selected_token_indices.clone()
             # sampling_metadata.selected_token_indices[0] = hidden_states.shape[0]-1
+            # for i in range(len(select_token_indices)):
+            #     sampling_metadata.selected_token_indices[i] = select_token_indices[i]
             sampling_metadata.selected_token_indices =  torch.tensor(select_token_indices,dtype=temp_data.dtype).to(temp_data.device)
             self.model.model.cache_fuse_metadata['check'] = False
             logits = self.model.compute_logits(hidden_states, sampling_metadata)
@@ -989,12 +1000,17 @@ class ModelRunner:
         # Only perform sampling in the driver worker.
         if not sampling_metadata.perform_sampling:
             return None
-
+        
         # Sample the next token.
         output = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
+        if attn_metadata.prefill_metadata:
+            for seq_group_metadata in seq_group_metadata_list:
+                # if seq_group_metadata.request_id not in self.real_first_token_time and seq_group_metadata.is_prompt:
+                self.real_first_token_time[seq_group_metadata.request_id] = time.time()
+            # print(hidden_states.shape)
         return output
 
     @torch.inference_mode()

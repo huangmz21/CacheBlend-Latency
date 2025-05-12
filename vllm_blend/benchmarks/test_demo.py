@@ -192,7 +192,7 @@ class ShareLLM(LLM):
         current_request_id_start = self.request_counter.counter
         for idx, result in enumerate(results):
             if (len(result) > 0 and result[0]["distance"] >= 0.5 and cache_fuse_metadata['recompute_mode'] == 1) or \
-                (len(result) > 0 and result[0]["distance"] >= 0.99 and cache_fuse_metadata['recompute_mode'] in [0,2]):
+                (len(result) > 0 and result[0]["distance"] >= 0.5 and cache_fuse_metadata['recompute_mode'] in [0,2]):
                 kvcache_disk_path = result[0]["kvcache_disk_path"]
                 candidate_prompt = result[0]["prompt"]
                 target_prompt = prompts[idx]
@@ -212,7 +212,7 @@ class ShareLLM(LLM):
                     target_matched_idx.remove(len(target_token_ids) -1)
                 
                 self.llm_engine.model_executor.driver_worker.model_runner.cpu_prefetch_kvcache_pool[current_request_id_start+idx] = {
-                    "kvcache": target_kvcache.to(self.llm_engine.model_executor.driver_worker.model_runner.device),
+                    "kvcache": target_kvcache,
                     "reused_positions": [i for i in range(len(target_token_ids)) if i in target_matched_idx],
                     "unreused_positions": [i for i in range(len(target_token_ids)) if i not in target_matched_idx]
                 }
@@ -222,7 +222,7 @@ class ShareLLM(LLM):
                 # NOTE 注意修改变量
                 target_kvcache = torch.zeros([32,2,len(target_token_ids),1024],device="cpu",dtype=torch.bfloat16)
                 self.llm_engine.model_executor.driver_worker.model_runner.cpu_prefetch_kvcache_pool[current_request_id_start+idx] = {
-                    "kvcache": target_kvcache.to(self.llm_engine.model_executor.driver_worker.model_runner.device),
+                    "kvcache": target_kvcache,
                     "reused_positions": [],
                     "unreused_positions": [i for i in range(len(target_token_ids))]
                 }
@@ -251,6 +251,8 @@ class ShareLLM(LLM):
                     if output.request_id in self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool:
                         output.hack_kvs = self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool[output.request_id]
                         self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool.pop(output.request_id)
+                    output.metrics.first_scheduled_time = self.llm_engine.model_executor.driver_worker.model_runner.real_schedule_time[output.request_id]
+                    output.metrics.first_token_time = self.llm_engine.model_executor.driver_worker.model_runner.real_first_token_time[output.request_id]
                     outputs.append(output)
                     
                     if use_tqdm:
@@ -332,18 +334,18 @@ if __name__ == "__main__":
     
     cache_fuse_metadata = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata
     
-    candidate_prompts = ["My name is Huan Yang, I come from China. What is your name? "]
-    target_prompts = ["My name is Huan Yang, I come from China. What is your name? " * 100]
+    candidate_prompts = ["My name is Huan Yang, I come from China. What is your name? ","This is China, I come from China. What is your name? "]
+    target_prompts = ["My name is Huan Yang, I come from China. What is your name? " * 50, "This is China, I come from China. What is your name? " * 50]
     
-    short_sampling_params = [SamplingParams(temperature=0.0,max_tokens=1)]
-    long_sampling_params = [SamplingParams(temperature=0.0,max_tokens=128)]
+    short_sampling_params = [SamplingParams(temperature=0.0,max_tokens=1),SamplingParams(temperature=0.0,max_tokens=1)]
+    long_sampling_params = [SamplingParams(temperature=0.0,max_tokens=128),SamplingParams(temperature=0.0,max_tokens=128)]
     
     outputs = llm.precompute_generate(prompts=candidate_prompts,
                                 sampling_params=short_sampling_params)
     
     print("================ Cacheblend ================")
     avg_ttft = []
-    for _ in range(10):
+    for _ in range(3):
         outputs = llm.cacheblend_generate(prompts=target_prompts,use_tqdm=False,
                                     sampling_params=long_sampling_params)
         
@@ -358,7 +360,7 @@ if __name__ == "__main__":
         
     print("================ KVShare ================")
     avg_ttft = []
-    for _ in range(10):
+    for _ in range(5):
         outputs = llm.kvshare_generate(prompts=target_prompts,use_tqdm=False,
                                     sampling_params=long_sampling_params)
         
@@ -371,7 +373,7 @@ if __name__ == "__main__":
 
     print("================ Naive ================")
     avg_ttft = []
-    for _ in range(10):
+    for _ in range(3):
         outputs = llm.naive_generate(prompts=target_prompts,use_tqdm=False,
                                     sampling_params=long_sampling_params)
         
@@ -381,7 +383,7 @@ if __name__ == "__main__":
     print(sum(avg_ttft)/len(avg_ttft))
     print("================ Full Compute ================")
     avg_ttft = []
-    for _ in range(10):
+    for _ in range(3):
         outputs = llm.generate(prompts=target_prompts,use_tqdm=False,
                                 sampling_params=long_sampling_params)
         

@@ -22,7 +22,7 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-
+import time
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -174,6 +174,8 @@ class LlamaAttention(nn.Module):
         if status in [1,2]:
             if cache_fuse_metadata["fake_q"] is None:
                 cache_fuse_metadata['fake_q'] = torch.rand_like(q)
+            # if old_kv is None:
+                # pass
             _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
                                         cache_fuse_metadata['fake_q'],
                                         old_kv[0])
@@ -364,6 +366,7 @@ class LlamaModel(nn.Module):
             old_kv = self.old_kvs[i]
             
             layer = self.layers[i]
+            start_time = time.time()
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -375,6 +378,9 @@ class LlamaModel(nn.Module):
                 cache_fuse_metadata=self.cache_fuse_metadata,
                 old_kv=old_kv
             )
+            end_time = time.time()
+            # if temp_status in [0,1,2]:
+            #     print(f"hidden_states shape:{hidden_states.shape}, layer {i} forward time: {end_time - start_time}s")
             
             if temp_status==1:
                 #import pdb
