@@ -179,6 +179,7 @@ class ModelRunner:
         self.cpu_prefetch_kvcache_pool = {}
         self.real_schedule_time = {}
         self.real_first_token_time = {}
+        self.prefetch_time = 0
         
 
     def load_model(self) -> None:
@@ -902,7 +903,7 @@ class ModelRunner:
             prefix_seq_len = 0
             select_token_indices = []
             prefix_unreused_token_len = 0
-            
+            start_time = time.time()
 
             for seq_group_metadata in seq_group_metadata_list:
                 request_id = int(seq_group_metadata.request_id)
@@ -922,6 +923,8 @@ class ModelRunner:
             self.model.model.old_kvs = batch_target_kvcache.to(self.device)
             self.model.model.cache_fuse_metadata['reused_positions'] = batch_reused_positions.to(self.device)
             self.model.model.cache_fuse_metadata['unreused_positions'] = batch_unreused_positions.to(self.device)
+            end_time = time.time()
+            self.prefetch_time += end_time - start_time
 
         # 异步计算下强制设置check为False，以防报错
         if attn_metadata.decode_metadata:
@@ -935,8 +938,8 @@ class ModelRunner:
         start_time = time.time()
         hidden_states = model_executable(**execute_model_kwargs)
         end_time = time.time()
-        if attn_metadata.prefill_metadata:
-            print(f"model forward time: {end_time - start_time}s")
+        # if attn_metadata.prefill_metadata:
+        #     print(f"hidden_states shape: {hidden_states.shape}, model forward time: {end_time - start_time}s")
 
         # =====================开始HACK 这里需要清空model_runner
         if attn_metadata.prefill_metadata is not None and self.model.model.cache_fuse_metadata['check']:
@@ -988,9 +991,9 @@ class ModelRunner:
         if self.model.model.cache_fuse_metadata['check']:
             temp_data = sampling_metadata.selected_token_indices.clone()
             # sampling_metadata.selected_token_indices[0] = hidden_states.shape[0]-1
-            # for i in range(len(select_token_indices)):
-            #     sampling_metadata.selected_token_indices[i] = select_token_indices[i]
-            sampling_metadata.selected_token_indices =  torch.tensor(select_token_indices,dtype=temp_data.dtype).to(temp_data.device)
+            for i in range(len(select_token_indices)):
+                sampling_metadata.selected_token_indices[i] = select_token_indices[i]
+            # sampling_metadata.selected_token_indices =  torch.tensor(select_token_indices,dtype=temp_data.dtype).to(temp_data.device)
             self.model.model.cache_fuse_metadata['check'] = False
             logits = self.model.compute_logits(hidden_states, sampling_metadata)
             sampling_metadata.selected_token_indices = temp_data

@@ -137,6 +137,8 @@ class Qwen2Attention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               sliding_window=self.sliding_window)
+        
+        self.hack_kv = []
 
     def forward(
         self,
@@ -144,11 +146,27 @@ class Qwen2Attention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+         status,
+        cache_fuse_metadata,
+        old_kv,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if status in [1,2]:
+            if cache_fuse_metadata["fake_q"] is None:
+                cache_fuse_metadata['fake_q'] = torch.rand_like(q)
+            # if old_kv is None:
+                # pass
+            _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
+                                        cache_fuse_metadata['fake_q'],
+                                        old_kv[0])
+            
+        if cache_fuse_metadata['collect']:
+            self.hack_kv = [k.clone(), v.clone()]
+        
+        
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata, status, cache_fuse_metadata, old_kv)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -194,6 +212,9 @@ class Qwen2DecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
+        status: int,
+        cache_fuse_metadata: dict,
+        old_kv,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -207,7 +228,12 @@ class Qwen2DecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
+            status=status,
+            cache_fuse_metadata=cache_fuse_metadata,
+            old_kv=old_kv,
         )
+        if status == 1:
+            residual = residual[cache_fuse_metadata["imp_indices"]]
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -237,6 +263,25 @@ class Qwen2Model(nn.Module):
             for layer_idx in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.cache_fuse_metadata = {"check_layers":[1],
+                                    "check": False,
+                                    "recomp_ratios":[0.16],
+                                    "recomp_ratio":0.16,
+                                    "original_slot_mapping":None,
+                                    "our_slot_mapping":None,
+                                    "kv_cache_dtype": None,
+                                    "attn_bias": None,
+                                    "imp_indices": None,
+                                    "org_seq_len": None,
+                                    "reused_positions": None,
+                                    "unreused_positions": None,
+                                    "collect": False,
+                                    "recompute_mode": 0,
+                                    "recompute_indices_in_decode": None,
+                                    "kvshare_atten_mask": None,
+                                    }
+        
+        self.old_kvs = [[None,None]] * len(self.layers)
 
     def forward(
         self,
@@ -244,18 +289,57 @@ class Qwen2Model(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
+        
+        check_layer_idx = 0
+        if attn_metadata.prefill_metadata:
+            temp_status = 0 # full prefill
+            if self.cache_fuse_metadata["check"]:
+                self.cache_fuse_metadata["org_seq_len"] = input_ids.shape[0] 
+                check_layer_idx = 0
+                self.cache_fuse_metadata["fake_q"] = None  
+                self.cache_fuse_metadata["attn_bias"] = None
+                self.cache_fuse_metadata["imp_indices"] = None
+                self.cache_fuse_metadata["original_slot_mapping"] = None
+                self.cache_fuse_metadata["our_slot_mapping"] = None
+                self.cache_fuse_metadata['org_pos'] = positions[:]
+            #FIXME(Jiayi): fix this clone for faster time (Is this still needed?)
+            #self.cache_fuse_metadata["our_slot_mapping"] = input_metadata.slot_mapping.clone()
+        else:
+            temp_status = -1 # decode
+        residual = None
+        
+        
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
+            
+            if self.cache_fuse_metadata["check"]:
+                if i in self.cache_fuse_metadata["check_layers"]:
+                    temp_status = 1 # check this layer
+                    self.cache_fuse_metadata["check_layer"] = self.cache_fuse_metadata["check_layers"][check_layer_idx]
+                    check_layer_idx += 1
+                elif i > self.cache_fuse_metadata["check_layers"][0]:
+                    temp_status = 2 # after check
+            
+            old_kv = self.old_kvs[i]
+            
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 kv_caches[i],
                 attn_metadata,
                 residual,
+              status = temp_status,
+                cache_fuse_metadata=self.cache_fuse_metadata,
+                old_kv=old_kv
             )
+            if temp_status==1:
+                #import pdb
+                #pdb.set_trace()
+                positions = positions[self.cache_fuse_metadata["imp_indices"]]
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -304,6 +388,7 @@ class Qwen2ForCausalLM(nn.Module):
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        
 
     def forward(
         self,

@@ -1,6 +1,9 @@
 import torch
 from collections import deque
 from typing import List
+import os
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+
 from vllm import LLMEngine, SamplingParams, LLM
 from typing import List, Optional, Union
 from vllm.engine.arg_utils import EngineArgs
@@ -16,10 +19,10 @@ from sentence_transformers import SentenceTransformer
 from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Collection
 from pymilvus import MilvusClient
 import time
-import os
+
 from edit2 import TokenMatch, match_sequences
 import uuid
-os.environ["VLLM_USE_MODELSCOPE"] = "False"
+
 
 class Request:
     
@@ -201,12 +204,12 @@ class ShareLLM(LLM):
                 target_token_ids = self.tokenizer.encode(target_prompt)
                 candidate_token_ids = self.tokenizer.encode(candidate_prompt)
                 candidate_kvcache = torch.load(kvcache_disk_path)
-                target_kvcache = torch.zeros([candidate_kvcache.shape[0],candidate_kvcache.shape[1],len(target_token_ids),candidate_kvcache.shape[-1]],device="cpu",dtype=candidate_kvcache.dtype)
+                target_kvcache = torch.zeros([candidate_kvcache.shape[0],candidate_kvcache.shape[1],len(target_token_ids),candidate_kvcache.shape[-1]],device="cpu",dtype=torch.float16)
                 target_matched_idx, candidate_matched_idx = match_sequences(target_token_ids, candidate_token_ids)
                 
                 
                 
-                target_kvcache[:,:,target_matched_idx,:] = candidate_kvcache[:,:,candidate_matched_idx,:]
+                target_kvcache[:,:,target_matched_idx,:] = candidate_kvcache[:,:,candidate_matched_idx,:].to(torch.float16)
                 
                 if len(target_token_ids) -1 in target_matched_idx:
                     target_matched_idx.remove(len(target_token_ids) -1)
@@ -220,7 +223,11 @@ class ShareLLM(LLM):
                 target_prompt = prompts[idx]
                 target_token_ids = self.tokenizer.encode(target_prompt)
                 # NOTE 注意修改变量
-                target_kvcache = torch.zeros([32,2,len(target_token_ids),1024],device="cpu",dtype=torch.bfloat16)
+                head_dim = self.llm_engine.model_config.hf_config.head_dim
+                num_kv_heads = self.llm_engine.model_config.hf_config.num_key_value_heads
+                num_layers = self.llm_engine.model_config.hf_config.num_hidden_layers
+                
+                target_kvcache = torch.zeros([num_layers,2,len(target_token_ids),head_dim * num_kv_heads],device="cpu",dtype=torch.float16)
                 self.llm_engine.model_executor.driver_worker.model_runner.cpu_prefetch_kvcache_pool[current_request_id_start+idx] = {
                     "kvcache": target_kvcache,
                     "reused_positions": [],
@@ -274,7 +281,7 @@ class ShareLLM(LLM):
         
         """
         cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['check'] = False
+        cache_fuse_metadata['check'] = True
         cache_fuse_metadata['recompute_mode'] = 0
         
         return self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
@@ -290,7 +297,7 @@ class ShareLLM(LLM):
         
         """
         cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['check'] = False
+        cache_fuse_metadata['check'] = True
         cache_fuse_metadata['recompute_mode'] = 2
 
         return self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
@@ -306,7 +313,7 @@ class ShareLLM(LLM):
         
         """
         cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['check'] = False
+        cache_fuse_metadata['check'] = True
         cache_fuse_metadata['recompute_mode'] = 3
 
         return self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
@@ -322,15 +329,15 @@ class ShareLLM(LLM):
         
         """
         cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['check'] = False
+        cache_fuse_metadata['check'] = True
         cache_fuse_metadata['recompute_mode'] = 1
 
         return self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
 
 
 if __name__ == "__main__":
-    
-    llm = ShareLLM(model="/root/.cache/huggingface/hub/models--mistralai--Mistral-7B-Instruct-v0.2/snapshots/3ad372fc79158a2148299e3318516c786aeded6c",device="cuda:0",dtype="bfloat16")
+    model_name = "/root/.cache/modelscope/hub/models/01ai/Yi-34B-Chat-4bits"
+    llm = ShareLLM(model=model_name,device="cuda:0",dtype="float16")
     
     cache_fuse_metadata = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata
     

@@ -269,7 +269,7 @@ class XFormersImpl(AttentionImpl):
                     # 计算attn_weight
                     
                     if len(sub_unreused_positions) > 0 and len(sub_reused_positions) > 0:
-                        topk_num = max(1, int(len(reused_positions)*cache_fuse_metadata["recomp_ratio"]))
+                        topk_num = max(1, int(len(sub_reused_positions)*cache_fuse_metadata["recomp_ratio"]))
                         temp_diff = torch.sum((value[sub_reused_positions,:,:]-value_old[sub_reused_positions,:,:])**2, dim=[1,2])
                         attn_weight = torch.matmul(query[sub_unreused_positions[-1],:,:].unsqueeze(0).transpose(0,1), repeat_kv(key[sub_reused_positions,...,:], self.num_queries_per_kv).permute(1,2,0)).sum(dim=0)
                         metric = attn_weight*temp_diff
@@ -278,7 +278,7 @@ class XFormersImpl(AttentionImpl):
                         bottom_indices = torch.topk(metric, k=int(len(sub_reused_positions)*(1-cache_fuse_metadata["recomp_ratio"])), largest=False).indices[0]
                         batch_top_indices.append(top_indices)
                         batch_bottom_indices.append(bottom_indices)
-                    pass
+                    
                 if len(batch_top_indices) > 0:
                     bottom_indices = torch.cat(batch_bottom_indices) 
                 else:

@@ -18,6 +18,7 @@ import time
 import os
 from edit2 import TokenMatch, match_sequences
 import uuid
+import argparse
 os.environ["VLLM_USE_MODELSCOPE"] = "False"
 import json
 import threading
@@ -265,7 +266,7 @@ class ShareLLM(LLM):
         # 添加进度条
         for idx, result in tqdm(enumerate(results), total=len(results), desc="处理KV Cache匹配"):
             if (len(result) > 0 and result[0]["distance"] >= 0.5 and cache_fuse_metadata['recompute_mode'] == 1) or \
-                (len(result) > 0 and result[0]["distance"] >= 0.5 and cache_fuse_metadata['recompute_mode'] in [0,2]):
+                (len(result) > 0 and result[0]["distance"] >= 0.99 and cache_fuse_metadata['recompute_mode'] in [0,2]):
                 kvcache_disk_path = result[0]["kvcache_disk_path"]
                 candidate_prompt = result[0]["prompt"]
                 target_prompt = prompts[idx]
@@ -274,12 +275,12 @@ class ShareLLM(LLM):
                 target_token_ids = self.tokenizer.encode(target_prompt)
                 candidate_token_ids = self.tokenizer.encode(candidate_prompt)
                 candidate_kvcache = torch.load(kvcache_disk_path)
-                target_kvcache = torch.zeros([candidate_kvcache.shape[0],candidate_kvcache.shape[1],len(target_token_ids),candidate_kvcache.shape[-1]],device="cpu",dtype=candidate_kvcache.dtype)
+                target_kvcache = torch.zeros([candidate_kvcache.shape[0],candidate_kvcache.shape[1],len(target_token_ids),candidate_kvcache.shape[-1]],device="cpu",dtype=torch.float16)
                 target_matched_idx, candidate_matched_idx = match_sequences(target_token_ids, candidate_token_ids)
                 
                 
                 
-                target_kvcache[:,:,target_matched_idx,:] = candidate_kvcache[:,:,candidate_matched_idx,:]
+                target_kvcache[:,:,target_matched_idx,:] = candidate_kvcache[:,:,candidate_matched_idx,:].to(torch.float16)
                 
                 if len(target_token_ids) -1 in target_matched_idx:
                     target_matched_idx.remove(len(target_token_ids) -1)
@@ -293,7 +294,11 @@ class ShareLLM(LLM):
                 target_prompt = prompts[idx]
                 target_token_ids = self.tokenizer.encode(target_prompt)
                 # NOTE 注意修改变量
-                target_kvcache = torch.zeros([32,2,len(target_token_ids),1024],device="cpu",dtype=torch.bfloat16)
+                head_dim = self.llm_engine.model_config.hf_config.head_dim
+                num_kv_heads = self.llm_engine.model_config.hf_config.num_key_value_heads
+                num_layers = self.llm_engine.model_config.hf_config.num_hidden_layers
+                
+                target_kvcache = torch.zeros([num_layers,2,len(target_token_ids),head_dim * num_kv_heads],device="cpu",dtype=torch.float16)
                 self.llm_engine.model_executor.driver_worker.model_runner.cpu_prefetch_kvcache_pool[current_request_id_start+idx] = {
                     "kvcache": target_kvcache,
                     "reused_positions": [],
@@ -352,7 +357,7 @@ class ShareLLM(LLM):
         
         return metrics
 
-    def _run_engine(self, use_tqdm: bool, rate: float = 10.0, requests: List[str] = None) -> List[RequestOutput]:
+    def _run_engine(self, use_tqdm: bool, rate: float = 10.0, requests: List[str] = None, compute_mode: int = 0) -> List[RequestOutput]:
         """
         运行引擎处理请求，根据设定的QPS控制请求发送速率
         
@@ -406,16 +411,38 @@ class ShareLLM(LLM):
             
             # 处理请求
             if prompts:
-                # self.generate(
-                #     prompts=prompts,
-                #     sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
-                # )
-                self.cacheblend_generate(
-                    prompts=prompts,
-                    sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
-                )
-            cache_fuse_metadata['collect'] = False
-            cache_fuse_metadata['check'] = True
+                if compute_mode == 0:
+                    self.generate(
+                        prompts=prompts,
+                        sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
+                    )
+                elif compute_mode == 1:
+                    self.cacheblend_generate(
+                        prompts=prompts,
+                        sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
+                    )
+                elif compute_mode == 2:
+                    self.kvshare_generate(
+                        prompts=prompts,
+                        sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
+                    )
+                elif compute_mode == 3:
+                    self.naive_generate(
+                        prompts=prompts,
+                        sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
+                    )
+            if compute_mode  in [1,2,3]:
+                cache_fuse_metadata['collect'] = False
+                cache_fuse_metadata['check'] = True
+            #     self.cacheblend_generate(
+            #         prompts=prompts,
+            #         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
+            #     )
+            #     self.kvshare_generate(
+            #         prompts=prompts,
+            #         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
+            #     )
+           
             
             # 记录step开始时间
             step_start_time = time.time()
@@ -434,8 +461,8 @@ class ShareLLM(LLM):
                     if output.request_id in self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool:
                         output.hack_kvs = self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool[output.request_id]
                         self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool.pop(output.request_id)
-                    # output.metrics.first_scheduled_time = self.llm_engine.model_executor.driver_worker.model_runner.real_schedule_time[output.request_id]
-                    # output.metrics.first_token_time = self.llm_engine.model_executor.driver_worker.model_runner.real_first_token_time[output.request_id]
+                    output.metrics.first_scheduled_time = self.llm_engine.model_executor.driver_worker.model_runner.real_schedule_time[output.request_id]
+                    output.metrics.first_token_time = self.llm_engine.model_executor.driver_worker.model_runner.real_first_token_time[output.request_id]
                     outputs.append(output)
                     if use_tqdm and requests:
                         pbar.update(1)
@@ -445,8 +472,8 @@ class ShareLLM(LLM):
             
         # 计算总运行时间（只包含step的时间）
         end_time = time.time()
-        total_duration = end_time - start_time
-        
+        total_duration = end_time - start_time - self.llm_engine.model_executor.driver_worker.model_runner.prefetch_time
+        self.llm_engine.model_executor.driver_worker.model_runner.prefetch_time = 0
         # 计算性能指标
         metrics = self.calculate_metrics(outputs, total_duration)
         
@@ -536,8 +563,8 @@ class ShareLLM(LLM):
         """
         
         """
-        cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['check'] = False
+        # cache_fuse_metadata['collect'] = False
+        # cache_fuse_metadata['check'] = False
         cache_fuse_metadata['recompute_mode'] = 3
 
         self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
@@ -552,52 +579,50 @@ class ShareLLM(LLM):
         """
         
         """
-        cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['check'] = False
+        # cache_fuse_metadata['collect'] = False
+        # cache_fuse_metadata['check'] = False
         cache_fuse_metadata['recompute_mode'] = 1
 
         self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
 
 
 if __name__ == "__main__":
+    # 添加命令行参数解析
+    parser = argparse.ArgumentParser(description='运行LLM推理测试')
+    parser.add_argument('--compute-mode', type=int, default=0, choices=[0, 1, 2, 3],
+                      help='计算模式: 0=cacheblend, 1=kvshare, 2=epic, 3=naive')
+    parser.add_argument('--rate', type=float, default=10.0,
+                      help='请求发送速率 (请求/秒)')
+    parser.add_argument('--model-path', type=str, 
+                      default="/root/.cache/modelscope/hub/models/01ai/Yi-34B-Chat-4bits",
+                      help='模型路径')
+    parser.add_argument('--num-requests', type=int, default=30,
+                      help='要处理的请求数量')
+    args = parser.parse_args()
     
-    llm = ShareLLM(model="/root/.cache/huggingface/hub/models--mistralai--Mistral-7B-Instruct-v0.2/snapshots/3ad372fc79158a2148299e3318516c786aeded6c",
-                    device="cuda:0",
-                    dtype="bfloat16",
-                    gpu_memory_utilization=0.7)
+    # 初始化模型
+    llm = ShareLLM(model=args.model_path,
+                  device="cuda:0",
+                  dtype="float16",
+                  gpu_memory_utilization=0.7)
     cache_fuse_metadata = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata
     
+    # 加载数据
     data_path = "/root/code/vllm_plus/examples/dataset/data/sharegpt/sharegpt90k_text_triplets.json"
-    
     data = json.load(open(data_path))
-    batch_size = 8
+    targets = data["targets"][:args.num_requests]
     
-    # =================== 预计算 ======================
-    # candiates = data["candidates"]
-
-    # total_batches = (len(candiates) + batch_size - 1) // batch_size
-    # for i in tqdm(range(0, len(candiates), batch_size), total=total_batches, desc="Processing batches"):
-    #     batch_prompts = candiates[i:i + batch_size]
-    #     llm.precompute_generate(batch_prompts, sampling_params=SamplingParams(max_tokens=1, temperature=0.0))
+    print(f"开始处理 {len(targets)} 个请求，速率为 {args.rate} 请求/s")
+    print(f"使用计算模式: {args.compute_mode}")
     
-    # ================== 离线batch计算 ==================
+    # 替换原有的generate函数
+    # llm.generate = custom_generate
+    compute_mode = args.compute_mode
     
-    targets = data["targets"][:64]
-    
-    # total_batches = (len(targets) + batch_size - 1) // batch_size
-    
-    # for i in tqdm(range(0, len(targets), batch_size), total=total_batches, desc="Processing batches"):
-    #     batch_prompts = targets[i:i + batch_size]
-    #     llm.naive_generate(batch_prompts, sampling_params=SamplingParams(max_tokens=1, temperature=0.0))
-    #     llm.sync_run_engine(use_tqdm=False)
-    
-    # targets = data["targets"]
-    
-    # 设置请求发送速率 (请求/s)
-    rate = 8
-    
-    print(f"开始处理 {len(targets)} 个请求，速率为 {rate} 请求/s")
-    
-    # 直接将所有请求发送给_run_engine函数处理
-    outputs = llm._run_engine(use_tqdm=True, rate=rate, requests=targets)
+    # 运行引擎
+    print("model_path: ", args.model_path)
+    print("num_requests: ", args.num_requests)
+    print("rate: ", args.rate)
+    print("compute_mode: ", compute_mode)
+    outputs = llm._run_engine(use_tqdm=True, rate=args.rate, requests=targets, compute_mode=compute_mode)
     
