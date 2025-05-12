@@ -279,7 +279,7 @@ class ShareLLM(LLM):
                 target_kvcache = torch.zeros([candidate_kvcache.shape[0],candidate_kvcache.shape[1],len(target_token_ids),candidate_kvcache.shape[-1]],device="cpu",dtype=torch.float16)
                 target_matched_idx, candidate_matched_idx = match_sequences(target_token_ids, candidate_token_ids)
                 
-                len_target_token_ids = len(target_token_ids)
+                # len_target_token_ids = len(target_token_ids)
                 self.token_hit.append( len(target_matched_idx) / len(target_token_ids))
                 
                 target_kvcache[:,:,target_matched_idx,:] = candidate_kvcache[:,:,candidate_matched_idx,:].to(torch.float16)
@@ -293,6 +293,7 @@ class ShareLLM(LLM):
                     "unreused_positions": [i for i in range(len(target_token_ids)) if i not in target_matched_idx]
                 }
             else:
+                self.token_hit.append(0)
                 target_prompt = prompts[idx]
                 target_token_ids = self.tokenizer.encode(target_prompt)
                 # NOTE 注意修改变量
@@ -381,7 +382,7 @@ class ShareLLM(LLM):
         start_time = time.time()
         last_step_duration = 0.0  # 上一次step的运行时间
         time_credit = 0.0  # 累积的时间额度，用于控制请求发送
-        
+        totoal_prepare_generate_time = 0.0
         while True:
             # 检查是否所有请求都已处理完毕
             if requests and current_request_idx >= total_requests and self.llm_engine.get_num_unfinished_requests() == 0:
@@ -413,43 +414,38 @@ class ShareLLM(LLM):
             
             # 处理请求
             if prompts:
-                if compute_mode == 0:
+                gen_start_time = time.time()
+                if compute_mode == -1:
                     self.generate(
                         prompts=prompts,
                         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
                     )
-                elif compute_mode == 1:
+                elif compute_mode == 0:
                     self.cacheblend_generate(
                         prompts=prompts,
                         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
                     )
-                elif compute_mode == 2:
+                elif compute_mode == 1:
                     self.kvshare_generate(
                         prompts=prompts,
                         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
                     )
-                elif compute_mode == 3:
+                elif compute_mode == 2:
                     self.epic_generate(
                         prompts=prompts,
                         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
                     )
-                elif compute_mode == 4:
+                elif compute_mode == 3:
                     self.naive_generate(
                         prompts=prompts,
                         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
                     )
-            if compute_mode  in [1,2,3,4]:
+                gen_end_time = time.time()
+                totoal_prepare_generate_time += gen_end_time - gen_start_time
+            if compute_mode  in [0,1,2,3]:
                 cache_fuse_metadata['collect'] = False
                 cache_fuse_metadata['check'] = True
-            #     self.cacheblend_generate(
-            #         prompts=prompts,
-            #         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
-            #     )
-            #     self.kvshare_generate(
-            #         prompts=prompts,
-            #         sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
-            #     )
-           
+
             
             # 记录step开始时间
             step_start_time = time.time()
@@ -480,8 +476,9 @@ class ShareLLM(LLM):
             
         # 计算总运行时间（只包含step的时间）
         end_time = time.time()
-        total_duration = end_time - start_time - self.llm_engine.model_executor.driver_worker.model_runner.prefetch_time
+        total_duration = end_time - start_time - self.llm_engine.model_executor.driver_worker.model_runner.prefetch_time - totoal_prepare_generate_time
         self.llm_engine.model_executor.driver_worker.model_runner.prefetch_time = 0
+        total_prepare_generate_time = 0.0
         self.llm_engine.model_executor.driver_worker.model_runner.real_schedule_time = {}
         self.llm_engine.model_executor.driver_worker.model_runner.real_first_token_time = {}
 
@@ -604,20 +601,20 @@ class ShareLLM(LLM):
 
 if __name__ == "__main__":
     # 添加命令行参数解析
-    parser = argparse.ArgumentParser(description='运行LLM推理测试')
-    parser.add_argument('--compute-mode', type=int, default=0, choices=[0, 1, 2, 3],
-                      help='计算模式: 0=cacheblend, 1=kvshare, 2=epic, 3=naive')
-    parser.add_argument('--rate', type=float, default=10.0,
-                      help='请求发送速率 (请求/秒)')
-    parser.add_argument('--model-path', type=str, 
-                      default="/root/.cache/modelscope/hub/models/LLM-Research/Meta-Llama-3.1-8B-Instruct",
-                      help='模型路径')
-    parser.add_argument('--num-requests', type=int, default=128,
-                      help='要处理的请求数量')
-    args = parser.parse_args()
-    
+    # parser = argparse.ArgumentParser(description='运行LLM推理测试')
+    # parser.add_argument('--compute-mode', type=int, default=0, choices=[0, 1, 2, 3],
+    #                   help='计算模式: 0=cacheblend, 1=kvshare, 2=epic, 3=naive')
+    # parser.add_argument('--rate', type=float, default=10.0,
+    #                   help='请求发送速率 (请求/秒)')
+    # parser.add_argument('--model-path', type=str, 
+    #                   default="/root/.cache/modelscope/hub/models/LLM-Research/Meta-Llama-3.1-8B-Instruct",
+    #                   help='模型路径')
+    # parser.add_argument('--num-requests', type=int, default=128,
+    #                   help='要处理的请求数量')
+    # args = parser.parse_args()
+    model_path="/root/.cache/modelscope/hub/models/LLM-Research/Meta-Llama-3.1-8B-Instruct"
     # 初始化模型
-    llm = ShareLLM(model=args.model_path,
+    llm = ShareLLM(model=model_path,
                   device="cuda:0",
                   dtype="float16",
                   max_model_len= 32768,
@@ -625,17 +622,25 @@ if __name__ == "__main__":
     cache_fuse_metadata = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata
     
     # 加载数据
-    data_path = "/root/code/vllm_plus/examples/dataset/data/sharegpt/sharegpt90k_text_triplets.json"
+    data_path = "/root/code/vllm_plus/examples/dataset/data/sharegpt/sharegpt90k_throught_benchmark.json"
     data = json.load(open(data_path))
-    targets = data["targets"][:args.num_requests]
     
-    # print(f"开始处理 {len(targets)} 个请求，速率为 {args.rate} 请求/s")
-    print(f"使用计算模式: {args.compute_mode}")
     
-
-    # 运行引擎
-    # FIXME(Huan Yang): 每次都是359请求找不大 
-    for mode in [2]:
-        for rate in [2,4,8,10,12,14,16,24]:
+    
+    # candidates = data["candidates"]
+    
+    # batch_size = 32
+    
+    # for i in range(0, len(candidates), batch_size):
+    #     batch_prompts = candidates[i:i+batch_size]
+    #     llm.precompute_generate(prompts=batch_prompts,sampling_params=SamplingParams(max_tokens=1, temperature=0.0))
+    
+    
+    targets = data["targets"]
+    # # 运行引擎
+    # # FIXME(Huan Yang): 每次都是359请求找不大 
+    # # 1是
+    for mode in [0]:
+        for rate in [2,3,4,6,8,9,10,12,14,16,24,32]:
             outputs = llm._run_engine(use_tqdm=True, rate=rate, requests=targets, compute_mode=mode)
     

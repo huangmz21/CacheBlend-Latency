@@ -919,7 +919,7 @@ class ModelRunner:
             batch_reused_positions = torch.tensor(batch_reused_positions,dtype=torch.int32).to(batch_target_kvcache.device)
             batch_unreused_positions = torch.tensor(batch_unreused_positions,dtype=torch.int32).to(batch_target_kvcache.device)
             
-            
+            select_token_indices = torch.tensor(select_token_indices,dtype=torch.int32).to(self.device)
             self.model.model.old_kvs = batch_target_kvcache.to(self.device)
             self.model.model.cache_fuse_metadata['reused_positions'] = batch_reused_positions.to(self.device)
             self.model.model.cache_fuse_metadata['unreused_positions'] = batch_unreused_positions.to(self.device)
@@ -934,6 +934,14 @@ class ModelRunner:
         for seq_group_metadata in seq_group_metadata_list:
             if seq_group_metadata.is_prompt:
                 self.real_schedule_time[seq_group_metadata.request_id] = time.time()
+
+
+        # 异步计算下强制设置check为False，以防报错  
+        # 添加额外的token进行decode
+        # if self.model.model.cache_fuse_metadata['recompute_indices_in_decode'] and attn_metadata.decode_metadata and attn_metadata.decode_metadata.recompute_mode in [0,1]:
+        #     pass
+            # 为当前token添加额外的token进行decode
+        
 
         start_time = time.time()
         hidden_states = model_executable(**execute_model_kwargs)
@@ -991,9 +999,10 @@ class ModelRunner:
         if self.model.model.cache_fuse_metadata['check']:
             temp_data = sampling_metadata.selected_token_indices.clone()
             # sampling_metadata.selected_token_indices[0] = hidden_states.shape[0]-1
-            for i in range(len(select_token_indices)):
-                sampling_metadata.selected_token_indices[i] = select_token_indices[i]
+            # for i in range(len(select_token_indices)):
+            #     sampling_metadata.selected_token_indices[i] = select_token_indices[i]
             # sampling_metadata.selected_token_indices =  torch.tensor(select_token_indices,dtype=temp_data.dtype).to(temp_data.device)
+            sampling_metadata.selected_token_indices = select_token_indices
             self.model.model.cache_fuse_metadata['check'] = False
             logits = self.model.compute_logits(hidden_states, sampling_metadata)
             sampling_metadata.selected_token_indices = temp_data
