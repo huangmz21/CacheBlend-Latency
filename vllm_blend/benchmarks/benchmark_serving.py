@@ -63,14 +63,13 @@ def sample_sharegpt_requests(
     with open(dataset_path) as f:
         dataset = json.load(f)
     # Filter out the conversations with less than 2 turns.
-    dataset = [data for data in dataset if len(data["conversations"]) >= 2]
+    dataset = [data for data in dataset if len(data["conversations"]["value"]) >= 2]
     # Only keep the first two turns of each conversation.
-    dataset = [(data["conversations"][0]["value"],
-                data["conversations"][1]["value"]) for data in dataset]
+    dataset = [(data["conversations"]["value"][0], data["conversations"]["value"][1]) for data in dataset]
 
     # some of these will be filtered out, so sample more than we need
     sampled_indices = random.sample(range(len(dataset)),
-                                    int(num_requests * 1.2))
+                                    min(int(num_requests*1.2), len(dataset)))
     dataset = [dataset[i] for i in sampled_indices]
 
     # Tokenize the prompts and completions.
@@ -101,6 +100,14 @@ def sample_sharegpt_requests(
     sampled_requests = random.sample(filtered_dataset, num_requests)
     return sampled_requests
 
+# def sample_sharegpt_requests_v2(
+#     dataset_path: str,
+#     num_requests: int,
+#     input_len: int,
+#     output_len: int,
+#     prefix_len: int,
+#     tokenizer: PreTrainedTokenizerBase,
+# ) -> List[Tuple[str, str, int, int]]:
 
 def sample_sonnet_requests(
     dataset_path: str,
@@ -483,7 +490,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset",
         type=str,
-        default=None,
+        default="/root/code/vllm_plus/examples/dataset/data/sharegpt/sampled_sharegpt.json",
         help="Path to the ShareGPT dataset, will be deprecated in the "
         "next release.",
     )
@@ -496,12 +503,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dataset-path",
                         type=str,
-                        default=None,
+                        default="/root/code/vllm_plus/examples/dataset/data/sharegpt/sampled_sharegpt.json",
                         help="Path to the dataset.")
     parser.add_argument(
         "--model",
         type=str,
-        required=True,
+        # required=True,
+        default="/root/.cache/huggingface/hub/models--mistralai--Mistral-7B-Instruct-v0.2/snapshots/3ad372fc79158a2148299e3318516c786aeded6c",
         help="Name of the model.",
     )
     parser.add_argument(
@@ -548,7 +556,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--request-rate",
         type=float,
-        default=float("inf"),
+        default=128,
         help="Number of requests per second. If this is inf, "
         "then all the requests are sent at time 0. "
         "Otherwise, we use Poisson process to synthesize "

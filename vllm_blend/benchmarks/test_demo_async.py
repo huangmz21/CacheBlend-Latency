@@ -109,12 +109,10 @@ class ShareLLM(LLM):
             collection_name=self.collection_name,
             dimension=self.sentence_llm.get_sentence_embedding_dimension(),  # The vectors we will use in this demo has 768 dimensions
         )
-        self.ttft_recoders = {
-            
-        }
-        self.throughput_recoders = {
-            
-        }
+        self.ttft_recoders = {}
+        self.tpot_recoders = {}
+        self.input_token_recorders = {}
+        self.output_token_recorders = {}
         self.tokenizer = self.get_tokenizer()
         self.engine_running = True
     
@@ -302,59 +300,162 @@ class ShareLLM(LLM):
         self.generate(prompts, sampling_params, prompt_token_ids, use_tqdm, lora_request, multi_modal_data)
 
     
-    
-    def _run_engine(self, use_tqdm: bool, timeout: int = 60, request_queue: Optional[mp.Queue] = None) -> List[RequestOutput]:
-        # Initialize tqdm.
-        if use_tqdm:
-            num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(total=num_requests,
-                        desc="处理请求进度",
-                        dynamic_ncols=True)
-        # Run the engine.
-        outputs: List[RequestOutput] = []
-        start_time = time.time()
+    def calculate_metrics(self, outputs: List[RequestOutput], dur_s: float) -> dict:
+        """计算性能指标"""
+        completed = 0
+        total_input = 0
+        total_output = 0
+        ttfts = []
+        tpots = []
         
-        while time.time() - start_time < timeout:  # 运行指定时间
-            try:
-                # 从队列获取请求，设置超时时间为0.1秒
-                if request_queue is not None:
-                    request = request_queue.get(timeout=0.1)
-                    
-                    if request is None:  # 收到结束标记
-                        print("\n收到结束标记，引擎停止")
-                        continue
-                        
-                    print("获取到请求")   
-                    # 处理请求
-                    self.generate(
-                        prompts=[request['prompt']],
-                        sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
-                    )
+        for output in outputs:
+            if output.finished:
+                completed += 1
+                # 计算输入token数
+                input_tokens = len(self.tokenizer.encode(output.prompt))
+                total_input += input_tokens
                 
-                # 处理引擎中的请求
-                step_outputs = self.llm_engine.step()
-                for output in step_outputs:
-                    if output.finished:
-                        if output.request_id in self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool:
-                            output.hack_kvs = self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool[output.request_id]
-                            self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool.pop(output.request_id)
-                        # 统计TTFT
-                        self.ttft_recoders[output.request_id] = ( output.metrics.first_token_time - output.metrics.first_scheduled_time) * 1000
-                        last_token_output_time = output.metrics.last_token_time
-                        first_token_output_time = output.metrics.first_token_time
-                        total_num_tokens = len(output.outputs[0].token_ids) + len(output.prompt_token_ids)
-                        throughput = total_num_tokens / (last_token_output_time - first_token_output_time)
-                        self.throughput_recoders[output.request_id] = throughput
-                        
-                        
-                        outputs.append(output)
-                        if use_tqdm:
-                            pbar.update(1)
-                            
-            except mp.queues.Empty:
-                # 如果队列为空，继续处理引擎中的请求
-                continue
+                # 计算输出token数
+                output_tokens = len(self.tokenizer.encode(output.outputs[0].text))
+                total_output += output_tokens
                 
+                # 计算TTFT
+                ttft = (output.metrics.first_token_time - output.metrics.first_scheduled_time) * 1000  # 转换为毫秒
+                ttfts.append(ttft)
+                
+                # 计算TPOT (Time per Output Token)
+                if output_tokens > 1:
+                    # 确保时间差为正数
+                    time_diff = max(0, output.metrics.finished_time - output.metrics.first_token_time)
+                    tpot = time_diff / (output_tokens - 1) * 1000  # 转换为毫秒
+                    if tpot > 0:  # 只记录有效的TPOT值
+                        tpots.append(tpot)
+        
+        metrics = {
+            "completed": completed,
+            "total_input": total_input,
+            "total_output": total_output,
+            "request_throughput": completed / dur_s,
+            "input_throughput": total_input / dur_s,
+            "output_throughput": total_output / dur_s,
+            "mean_ttft_ms": np.mean(ttfts) if ttfts else 0,
+            "median_ttft_ms": np.median(ttfts) if ttfts else 0,
+            "p99_ttft_ms": np.percentile(ttfts, 99) if ttfts else 0,
+            "mean_tpot_ms": np.mean(tpots) if tpots else 0,
+            "median_tpot_ms": np.median(tpots) if tpots else 0,
+            "p99_tpot_ms": np.percentile(tpots, 99) if tpots else 0,
+        }
+        
+        return metrics
+
+    def _run_engine(self, use_tqdm: bool, rate: float = 10.0, requests: List[str] = None) -> List[RequestOutput]:
+        """
+        运行引擎处理请求，根据设定的QPS控制请求发送速率
+        
+        Args:
+            use_tqdm: 是否显示进度条
+            rate: 目标QPS (每秒请求数)
+            requests: 待处理的请求列表
+        """
+        # 初始化进度条
+        if use_tqdm and requests:
+            pbar = tqdm(total=len(requests), desc="处理请求进度")
+        
+        # 存储输出结果
+        outputs: List[RequestOutput] = []
+        total_requests = len(requests) if requests else 0
+        current_request_idx = 0  # 当前处理到的请求索引
+        
+        # 记录开始时间
+        start_time = time.time()
+        last_step_duration = 0.0  # 上一次step的运行时间
+        time_credit = 0.0  # 累积的时间额度，用于控制请求发送
+        
+        while True:
+            # 检查是否所有请求都已处理完毕
+            if requests and current_request_idx >= total_requests and self.llm_engine.get_num_unfinished_requests() == 0:
+                break
+                
+            prompts = []
+            
+            # 决定获取多少请求
+            if requests and current_request_idx < total_requests:
+                # 累积时间额度
+                time_credit += last_step_duration
+                
+                # 计算累积时间内应该发送的请求数
+                # 例如：如果rate=10，累积了0.15秒，则应该发送1个请求
+                expected_requests = int(time_credit * rate)
+                
+                if expected_requests >= 1:
+                    # 如果累积时间足够发送至少一个请求
+                    batch_size = min(expected_requests, total_requests - current_request_idx)
+                    if batch_size > 0:
+                        prompts = requests[current_request_idx:current_request_idx + batch_size]
+                        current_request_idx += batch_size
+                        # 重置时间额度，但保留余数
+                        # 例如：如果rate=10，发送了1个请求，剩余0.05秒
+                        time_credit = (time_credit * rate - batch_size) / rate
+                else:
+                    # 如果累积时间不足一个请求，继续等待
+                    prompts = []
+            
+            # 处理请求
+            if prompts:
+                self.generate(
+                    prompts=prompts,
+                    sampling_params=SamplingParams(max_tokens=512, temperature=0.0)
+                )
+            
+            # 记录step开始时间
+            step_start_time = time.time()
+            
+            # 处理引擎中的请求
+            step_outputs = self.llm_engine.step()
+            
+            # 记录step结束时间并计算处理时间
+            step_end_time = time.time()
+            last_step_duration = step_end_time - step_start_time
+            
+            # 处理完成的请求
+            for output in step_outputs:
+                if output.finished:
+                    # 清理KV cache
+                    if output.request_id in self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool:
+                        output.hack_kvs = self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool[output.request_id]
+                        self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool.pop(output.request_id)
+                    outputs.append(output)
+                    if use_tqdm and requests:
+                        pbar.update(1)
+        
+        if use_tqdm and requests:
+            pbar.close()
+            
+        # 计算总运行时间
+        end_time = time.time()
+        total_duration = end_time - start_time
+        
+        # 计算性能指标
+        metrics = self.calculate_metrics(outputs, total_duration)
+        
+        # 打印性能指标
+        print("\n性能指标统计:")
+        print(f"总运行时间: {total_duration:.2f}秒")
+        print(f"完成请求数: {metrics['completed']}")
+        print(f"总输入token数: {metrics['total_input']}")
+        print(f"总输出token数: {metrics['total_output']}")
+        print(f"请求吞吐量: {metrics['request_throughput']:.2f} req/s")
+        print(f"输入token吞吐量: {metrics['input_throughput']:.2f} tokens/s")
+        print(f"输出token吞吐量: {metrics['output_throughput']:.2f} tokens/s")
+        print("\nTTFT统计:")
+        print(f"平均TTFT: {metrics['mean_ttft_ms']:.2f}ms")
+        print(f"中位数TTFT: {metrics['median_ttft_ms']:.2f}ms")
+        print(f"P99 TTFT: {metrics['p99_ttft_ms']:.2f}ms")
+        print("\nTPOT统计:")
+        print(f"平均TPOT: {metrics['mean_tpot_ms']:.2f}ms")
+        print(f"中位数TPOT: {metrics['median_tpot_ms']:.2f}ms")
+        print(f"P99 TPOT: {metrics['p99_tpot_ms']:.2f}ms")
+            
         return outputs
 
     def sync_run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
@@ -368,7 +469,9 @@ class ShareLLM(LLM):
         outputs: List[RequestOutput] = []
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
+            # 这里计算input吞吐量和输出吞吐量
             for output in step_outputs:
+                # 
                 if output.finished:
                     if output.request_id in self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool:
                         output.hack_kvs = self.llm_engine.model_executor.driver_worker.model_runner.cpu_hack_kvcache_pool[output.request_id]
@@ -396,11 +499,11 @@ class ShareLLM(LLM):
         self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
     
     def epic_generate(self,
-                                 prompts: Optional[Union[str, List[str]]] = None,
-                                 sampling_params: Optional[Union[SamplingParams,
-                                                                 List[SamplingParams]]] = None,
-                                 prompt_token_ids: Optional[List[List[int]]] = None,
-                                 use_tqdm: bool = True,
+                    prompts: Optional[Union[str, List[str]]] = None,
+                    sampling_params: Optional[Union[SamplingParams,
+                                                    List[SamplingParams]]] = None,
+                    prompt_token_ids: Optional[List[List[int]]] = None,
+                    use_tqdm: bool = True,
                                  ) -> List[RequestOutput]:
         """
         
@@ -443,47 +546,6 @@ class ShareLLM(LLM):
 
         self.share_generate(prompts, sampling_params, prompt_token_ids, use_tqdm)
 
-def request_sender(queue, target_queue, rate):
-    """
-    子进程函数，按照指定间隔时间发送请求
-    queue: 主进程的请求队列
-    target_queue: 目标提示词队列
-    rate: 请求间隔时间（秒）
-    """
-    start_time = time.time()
-    request_count = 0
-    total_requests = target_queue.qsize()  # 获取总请求数
-    
-    # 创建进度条
-    pbar = tqdm(total=total_requests, desc="发送请求进度", dynamic_ncols=True)
-    
-    while time.time() - start_time < 60:  # 运行60秒
-        try:
-            # 从目标队列获取提示词，设置超时时间为0.1秒
-            prompt = target_queue.get(timeout=0.1)
-            
-            # 向请求队列发送请求
-            queue.put({
-                'prompt': prompt,
-                'timestamp': time.time()
-            })
-            request_count += 1
-            pbar.update(1)  # 更新进度条
-            
-        except mp.queues.Empty:
-            # 如果目标队列为空，结束进程
-            print("\n目标队列为空，子进程结束")
-            break
-            
-        time.sleep(rate)  # 等待指定的间隔时间
-    
-    # 关闭进度条
-    pbar.close()
-    
-    # 发送结束标记
-    queue.put(None)
-    print(f"子进程完成，共发送 {request_count} 个请求")
-
 
 if __name__ == "__main__":
     
@@ -499,54 +561,21 @@ if __name__ == "__main__":
     batch_size = 8
     
     # =================== 预计算 ======================
-    candiates = data["candidates"]
-    # batch 32个一起提交
+    # candiates = data["candidates"]
+    # # batch 32个一起提交
     
-    total_batches = (len(candiates) + batch_size - 1) // batch_size
-    for i in tqdm(range(0, len(candiates), batch_size), total=total_batches, desc="Processing batches"):
-        batch_prompts = candiates[i:i + batch_size]
-        llm.precompute_generate(batch_prompts, sampling_params=SamplingParams(max_tokens=1, temperature=0.0))
+    # total_batches = (len(candiates) + batch_size - 1) // batch_size
+    # for i in tqdm(range(0, len(candiates), batch_size), total=total_batches, desc="Processing batches"):
+    #     batch_prompts = candiates[i:i + batch_size]
+    #     llm.precompute_generate(batch_prompts, sampling_params=SamplingParams(max_tokens=1, temperature=0.0))
     
-    # targets = data["targets"]
+    targets = data["targets"]
     
-    # # =================== 测试 ======================
-    # # 创建进程间通信队列
-    # request_queue = mp.Queue()
-    # target_queue = mp.Queue()
-
-    # # 将目标提示词放入队列
-    # for target in targets:
-    #     target_queue.put(target)
+    # 设置请求发送速率 (秒/请求)
+    rate = 2
     
-    # # 创建并启动请求发送进程
-    # rate = 0.1  # 每0.001秒发送1个请求
-    # sender_process = mp.Process(
-    #     target=request_sender,
-    #     args=(request_queue, target_queue, rate)
-    # )
-    # sender_process.start()
+    print(f"开始处理 {len(targets)} 个请求，速率为 {rate}s/请求")
     
-    # # 启动引擎并等待停止事件
-    # llm.engine_running = True
-    
-    # # 运行引擎
-    # outputs = llm._run_engine(use_tqdm=True, timeout=60, request_queue=request_queue)
-    
-    # # 等待发送进程结束
-    # sender_process.join()
- 
-    # # 打印统计信息
-    # print("\n请求统计信息:")
-    # print("TTFT统计:")
-    # ttft_values = list(llm.ttft_recoders.values())
-    # print(f"平均TTFT: {sum(ttft_values)/len(ttft_values):.2f}ms")
-    # print(f"标准差TTFT: {np.std(ttft_values):.2f}ms")
-    # print(f"最小TTFT: {min(ttft_values):.2f}ms")
-    # print(f"最大TTFT: {max(ttft_values):.2f}ms")
-    
-    # throughput_values = list(llm.throughput_recoders.values())
-    # print(f"平均吞吐量: {sum(throughput_values)/len(throughput_values):.2f} tokens/s")
-    # print(f"标准差吞吐量: {np.std(throughput_values):.2f} tokens/s")
-    # print(f"最小吞吐量: {min(throughput_values):.2f} tokens/s")
-    # print(f"最大吞吐量: {max(throughput_values):.2f} tokens/s")
+    # 直接将所有请求发送给_run_engine函数处理
+    outputs = llm._run_engine(use_tqdm=True, rate=rate, requests=targets)
     

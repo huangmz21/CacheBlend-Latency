@@ -332,7 +332,7 @@ class LlamaModel(nn.Module):
             hidden_states = inputs_embeds
         else:
             hidden_states = self.get_input_embeddings(input_ids)
-        
+        check_layer_idx = 0
         if attn_metadata.prefill_metadata:
             temp_status = 0 # full prefill
             if self.cache_fuse_metadata["check"]:
